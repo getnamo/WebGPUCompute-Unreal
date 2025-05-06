@@ -44,10 +44,6 @@
 #include <cmath>
 #include <memory>
 
-#if __EMSCRIPTEN__
-#include <emscripten.h>
-#endif
-
 #ifdef _MSVC_LANG
 #  if _MSVC_LANG >= 202002L
 #   define NO_DISCARD [[nodiscard("You should keep this handle alive for as long as the callback may get invoked.")]]
