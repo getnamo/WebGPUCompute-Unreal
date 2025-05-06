@@ -42,7 +42,7 @@ void UWebGPUComponent::Test()
 
 	// Display the object (WGPUInstance is a simple pointer, it may be
 	// copied around without worrying about its size).
-	UE_LOG(LogTemp, Error, TEXT("WGPU instance: %d"), instance);
+	UE_LOG(LogTemp, Log, TEXT("WGPU instance: %d"), instance);
 
 	// We clean up the WebGPU instance
 	wgpuInstanceRelease(instance);
