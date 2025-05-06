@@ -78,7 +78,11 @@ public class WebGPUCompute : ModuleRules
 			string Win64LibPath = Path.Combine(WebGpuLibPath, "Win64");
 			string Win64BinariesPath = Path.Combine(WebGpuBinariesPath, "Win64");
 
-			PublicAdditionalLibraries.Add(Path.Combine(Win64LibPath, "wgpu_native.lib"));
+			//Add libs
+			//PublicAdditionalLibraries.Add(Path.Combine(Win64LibPath, "wgpu_native.lib")); //static?
+			PublicAdditionalLibraries.Add(Path.Combine(Win64LibPath, "wgpu_native.dll.lib"));
+			
+			//Add dlls (copy to plugin binaries)
 			RuntimeDependencies.Add("$(BinaryOutputDir)/wgpu_native.dll", Path.Combine(Win64BinariesPath, "wgpu_native.dll"));
 		}
 	}
