@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "WebGPUCompute",
+	"Description": "",
+	"Category": "Compute",
+	"CreatedBy": "getnamo",
+	"CreatedByURL": "https://github.com/getnamo/",
+	"DocsURL": "https://github.com/getnamo/webgpucompute-unreal",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "WebGPUCompute",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
