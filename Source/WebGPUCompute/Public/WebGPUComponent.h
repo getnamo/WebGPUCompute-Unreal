@@ -10,7 +10,8 @@ class WEBGPUCOMPUTE_API UWebGPUComponent : public UActorComponent
 	GENERATED_BODY()
 
 public:	
-	UWebGPUComponent();
+	UWebGPUComponent(const FObjectInitializer& ObjectInitializer);
+	~UWebGPUComponent();
 
 	//Debug function for first pass test
 	UFUNCTION(BlueprintCallable, Category = "Utility")
@@ -24,4 +25,8 @@ protected:
 
 public:	
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
+protected:
+
+	class FWebGPUInternal* Internal = nullptr;
 };
