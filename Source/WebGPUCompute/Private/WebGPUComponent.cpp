@@ -127,8 +127,9 @@ public:
 		FTCHARToUTF8 Converter(*Source);
 		const char* SourceBuffer = Converter.Get();
 
-		WGPUShaderSourceWGSL sourceDesc = {};
-		sourceDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
+		WGPUShaderSourceWGSL SourceDesc = {};
+		SourceDesc.chain.next = nullptr;
+		SourceDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
 
 		//uint32_t numbers[] = { 1, 2, 3, 4 };
 		//uint32_t NumbersSize = sizeof(numbers);
@@ -138,103 +139,103 @@ public:
 		int32 NumbersSize = Numbers.Num() * sizeof(int32);
 		int32 NumbersLength = Numbers.Num();
 
-		sourceDesc.code = { SourceBuffer, WGPU_STRLEN};
+		SourceDesc.code = { SourceBuffer, WGPU_STRLEN};
 
-		WGPUShaderModuleDescriptor shaderDesc = {};
-		shaderDesc.label = { "shader.wgsl", WGPU_STRLEN };
-		shaderDesc.nextInChain = reinterpret_cast<const WGPUChainedStruct*>(&sourceDesc);
+		WGPUShaderModuleDescriptor ShaderDesc = {};
+		ShaderDesc.label = { "shader.wgsl", WGPU_STRLEN };
+		ShaderDesc.nextInChain = reinterpret_cast<const WGPUChainedStruct*>(&SourceDesc);
 
-		WGPUShaderModule shader_module = wgpuDeviceCreateShaderModule(Device, &shaderDesc);
-		assert(shader_module);
+		WGPUShaderModule ShaderModule = wgpuDeviceCreateShaderModule(Device, &ShaderDesc);
+		assert(ShaderModule);
 
 		// --- Create staging buffer ---
-		WGPUBufferDescriptor stagingDesc = {};
-		stagingDesc.label = { "staging_buffer", WGPU_STRLEN };
-		stagingDesc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
-		stagingDesc.size = NumbersSize;
-		stagingDesc.mappedAtCreation = false;
+		WGPUBufferDescriptor StagingDesc = {};
+		StagingDesc.label = { "staging_buffer", WGPU_STRLEN };
+		StagingDesc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+		StagingDesc.size = NumbersSize;
+		StagingDesc.mappedAtCreation = false;
 
-		WGPUBuffer staging_buffer = wgpuDeviceCreateBuffer(Device, &stagingDesc);
-		assert(staging_buffer);
+		WGPUBuffer StagingBuffer = wgpuDeviceCreateBuffer(Device, &StagingDesc);
+		assert(StagingBuffer);
 
 		// --- Create storage buffer ---
-		WGPUBufferDescriptor storageDesc = {};
-		storageDesc.label = { "storage_buffer", WGPU_STRLEN };
-		storageDesc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
-		storageDesc.size = NumbersSize;
-		storageDesc.mappedAtCreation = false;
+		WGPUBufferDescriptor StorageDesc = {};
+		StorageDesc.label = { "storage_buffer", WGPU_STRLEN };
+		StorageDesc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
+		StorageDesc.size = NumbersSize;
+		StorageDesc.mappedAtCreation = false;
 
-		WGPUBuffer storage_buffer = wgpuDeviceCreateBuffer(Device, &storageDesc);
-		assert(storage_buffer);
+		WGPUBuffer StorageBuffer = wgpuDeviceCreateBuffer(Device, &StorageDesc);
+		assert(StorageBuffer);
 
 		// --- Create compute pipeline ---
-		WGPUProgrammableStageDescriptor stageDesc = {};
-		stageDesc.module = shader_module;
-		stageDesc.entryPoint = { "main", WGPU_STRLEN };
+		WGPUProgrammableStageDescriptor StageDesc = {};
+		StageDesc.module = ShaderModule;
+		StageDesc.entryPoint = { "main", WGPU_STRLEN };
 
-		WGPUComputePipelineDescriptor pipelineDesc = {};
-		pipelineDesc.label = { "compute_pipeline", WGPU_STRLEN };
-		pipelineDesc.compute = stageDesc;
+		WGPUComputePipelineDescriptor PipelineDesc = {};
+		PipelineDesc.label = { "compute_pipeline", WGPU_STRLEN };
+		PipelineDesc.compute = StageDesc;
 
-		WGPUComputePipeline compute_pipeline = wgpuDeviceCreateComputePipeline(Device, &pipelineDesc);
-		assert(compute_pipeline);
+		WGPUComputePipeline ComputePipeline = wgpuDeviceCreateComputePipeline(Device, &PipelineDesc);
+		assert(ComputePipeline);
 
 		// --- Create bind group layout ---
-		WGPUBindGroupLayout bind_group_layout = wgpuComputePipelineGetBindGroupLayout(compute_pipeline, 0);
-		assert(bind_group_layout);
+		WGPUBindGroupLayout BindGroupLayout = wgpuComputePipelineGetBindGroupLayout(ComputePipeline, 0);
+		assert(BindGroupLayout);
 
 		// --- Create bind group ---
-		WGPUBindGroupEntry bindEntry = {};
-		bindEntry.binding = 0;
-		bindEntry.buffer = storage_buffer;
-		bindEntry.offset = 0;
-		bindEntry.size = NumbersSize;
+		WGPUBindGroupEntry BindEntry = {};
+		BindEntry.binding = 0;
+		BindEntry.buffer = StorageBuffer;
+		BindEntry.offset = 0;
+		BindEntry.size = NumbersSize;
 
-		WGPUBindGroupDescriptor bindGroupDesc = {};
-		bindGroupDesc.label = { "bind_group", WGPU_STRLEN };
-		bindGroupDesc.layout = bind_group_layout;
-		bindGroupDesc.entryCount = 1;
-		bindGroupDesc.entries = &bindEntry;
+		WGPUBindGroupDescriptor BindGroupDesc = {};
+		BindGroupDesc.label = { "bind_group", WGPU_STRLEN };
+		BindGroupDesc.layout = BindGroupLayout;
+		BindGroupDesc.entryCount = 1;
+		BindGroupDesc.entries = &BindEntry;
 
-		WGPUBindGroup bind_group = wgpuDeviceCreateBindGroup(Device, &bindGroupDesc);
-		assert(bind_group);
+		WGPUBindGroup BindGroup = wgpuDeviceCreateBindGroup(Device, &BindGroupDesc);
+		assert(BindGroup);
 
 		// --- Create command encoder ---
-		WGPUCommandEncoderDescriptor encoderDesc = {};
-		encoderDesc.label = { "command_encoder", WGPU_STRLEN };
+		WGPUCommandEncoderDescriptor EncoderDesc = {};
+		EncoderDesc.label = { "command_encoder", WGPU_STRLEN };
 
-		WGPUCommandEncoder command_encoder = wgpuDeviceCreateCommandEncoder(Device, &encoderDesc);
-		assert(command_encoder);
+		WGPUCommandEncoder CommandEncoder = wgpuDeviceCreateCommandEncoder(Device, &EncoderDesc);
+		assert(CommandEncoder);
 
 		// --- Begin compute pass ---
 		WGPUComputePassDescriptor computePassDesc = {};
 		computePassDesc.label = { "compute_pass", WGPU_STRLEN };
 
-		WGPUComputePassEncoder compute_pass_encoder = wgpuCommandEncoderBeginComputePass(command_encoder, &computePassDesc);
-		assert(compute_pass_encoder);
+		WGPUComputePassEncoder ComputePassEncoder = wgpuCommandEncoderBeginComputePass(CommandEncoder, &computePassDesc);
+		assert(ComputePassEncoder);
 
 		// --- Dispatch compute ---
-		wgpuComputePassEncoderSetPipeline(compute_pass_encoder, compute_pipeline);
-		wgpuComputePassEncoderSetBindGroup(compute_pass_encoder, 0, bind_group, 0, nullptr);
-		wgpuComputePassEncoderDispatchWorkgroups(compute_pass_encoder, NumbersLength, 1, 1);
-		wgpuComputePassEncoderEnd(compute_pass_encoder);
-		wgpuComputePassEncoderRelease(compute_pass_encoder);
+		wgpuComputePassEncoderSetPipeline(ComputePassEncoder, ComputePipeline);
+		wgpuComputePassEncoderSetBindGroup(ComputePassEncoder, 0, BindGroup, 0, nullptr);
+		wgpuComputePassEncoderDispatchWorkgroups(ComputePassEncoder, NumbersLength, 1, 1);
+		wgpuComputePassEncoderEnd(ComputePassEncoder);
+		wgpuComputePassEncoderRelease(ComputePassEncoder);
 
 		// --- Copy buffer ---
-		wgpuCommandEncoderCopyBufferToBuffer(command_encoder, storage_buffer, 0, staging_buffer, 0, NumbersSize);
+		wgpuCommandEncoderCopyBufferToBuffer(CommandEncoder, StorageBuffer, 0, StagingBuffer, 0, NumbersSize);
 
 		// --- Finish command buffer ---
-		WGPUCommandBufferDescriptor cmdBufDesc = {};
-		cmdBufDesc.label = { "command_buffer", WGPU_STRLEN };
+		WGPUCommandBufferDescriptor CmdBufDesc = {};
+		CmdBufDesc.label = { "command_buffer", WGPU_STRLEN };
 
-		WGPUCommandBuffer command_buffer = wgpuCommandEncoderFinish(command_encoder, &cmdBufDesc);
-		assert(command_buffer);
+		WGPUCommandBuffer CommandBuffer = wgpuCommandEncoderFinish(CommandEncoder, &CmdBufDesc);
+		assert(CommandBuffer);
 
 		// --- Write data to buffer ---
-		wgpuQueueWriteBuffer(Queue, storage_buffer, 0, Numbers.GetData(), NumbersSize);
+		wgpuQueueWriteBuffer(Queue, StorageBuffer, 0, Numbers.GetData(), NumbersSize);
 
 		// --- Submit commands ---
-		wgpuQueueSubmit(Queue, 1, &command_buffer);
+		wgpuQueueSubmit(Queue, 1, &CommandBuffer);
 
 		// --- Map staging buffer ---
 		WGPUBufferMapCallbackInfo mapInfo = {};
@@ -245,13 +246,13 @@ public:
 			UE_LOG(LogTemp, Log, TEXT(" buffer_map status=%#.8x"), status)
 		};
 
-		wgpuBufferMapAsync(staging_buffer, WGPUMapMode_Read, 0, NumbersSize, mapInfo);
+		wgpuBufferMapAsync(StagingBuffer, WGPUMapMode_Read, 0, NumbersSize, mapInfo);
 
 		// --- Poll for map completion ---
 		wgpuDevicePoll(Device, true, nullptr);
 
 		// --- Access mapped buffer ---
-		uint32_t* buf = static_cast<uint32_t*>(wgpuBufferGetMappedRange(staging_buffer, 0, NumbersSize));
+		uint32_t* buf = static_cast<uint32_t*>(wgpuBufferGetMappedRange(StagingBuffer, 0, NumbersSize));
 		assert(buf);
 
 		//Set the out data
@@ -266,15 +267,15 @@ public:
 
 		UE_LOG(LogTemp, Log, TEXT("collatz times: [%s]"), *Times);
 
-		wgpuBufferUnmap(staging_buffer);
-		wgpuCommandBufferRelease(command_buffer);
-		wgpuCommandEncoderRelease(command_encoder);
-		wgpuBindGroupRelease(bind_group);
-		wgpuBindGroupLayoutRelease(bind_group_layout);
-		wgpuComputePipelineRelease(compute_pipeline);
-		wgpuBufferRelease(storage_buffer);
-		wgpuBufferRelease(staging_buffer);
-		wgpuShaderModuleRelease(shader_module);
+		wgpuBufferUnmap(StagingBuffer);
+		wgpuCommandBufferRelease(CommandBuffer);
+		wgpuCommandEncoderRelease(CommandEncoder);
+		wgpuBindGroupRelease(BindGroup);
+		wgpuBindGroupLayoutRelease(BindGroupLayout);
+		wgpuComputePipelineRelease(ComputePipeline);
+		wgpuBufferRelease(StorageBuffer);
+		wgpuBufferRelease(StagingBuffer);
+		wgpuShaderModuleRelease(ShaderModule);
 	}
 
 	//release all memories used
