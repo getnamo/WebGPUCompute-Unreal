@@ -262,10 +262,26 @@ public:
 	//release all memories used
 	void Shutdown()
 	{
-		wgpuQueueRelease(Queue);
-		wgpuDeviceRelease(Device);
-		wgpuAdapterRelease(Adapter);
-		wgpuInstanceRelease(Instance);
+		if (Queue)
+		{
+			wgpuQueueRelease(Queue);
+			Queue = nullptr;
+		}
+		if (Device)
+		{
+			wgpuDeviceRelease(Device);
+			Device = nullptr;
+		}
+		if (Adapter)
+		{
+			wgpuAdapterRelease(Adapter);
+			Adapter = nullptr;
+		}
+		if (Instance)
+		{
+			wgpuInstanceRelease(Instance);
+			Instance = nullptr;
+		}
 	}
 
 	bool HasStarted() 
