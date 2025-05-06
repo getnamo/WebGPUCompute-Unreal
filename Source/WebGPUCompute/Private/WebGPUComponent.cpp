@@ -120,6 +120,7 @@ public:
 	}
 
 	//Array In/out data bind shader, e.g. collatz count
+	//largely from: https://github.com/gfx-rs/wgpu-native/blob/trunk/examples/compute/main.c
 	void RunExampleShader(const FString& Source, const TArray<int32>& InData, TArray<int32>& OutData)
 	{
 		//Proper way of converting FString to char*
