@@ -115,9 +115,13 @@ public:
 		Adapter = RequestAdapterSync(Instance, &adapterOpts);
 		Device = RequestDeviceSync(Adapter, nullptr);
 
-		WGPUQueue Queue = wgpuDeviceGetQueue(Device);
+		Queue = wgpuDeviceGetQueue(Device);
 		assert(Queue);
+	}
 
+	//todo: export source and auto-bind
+	void RunShader()
+	{
 		WGPUShaderSourceWGSL sourceDesc = {};
 		sourceDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
 
@@ -269,9 +273,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 		mapInfo.callback = [](WGPUMapAsyncStatus status,
 			WGPUStringView message,
 			void* userdata1, void* userdata2)
-		{
-			UE_LOG(LogTemp, Log, TEXT(" buffer_map status=%#.8x"), status)
-		};
+			{
+				UE_LOG(LogTemp, Log, TEXT(" buffer_map status=%#.8x"), status)
+			};
 
 		wgpuBufferMapAsync(staging_buffer, WGPUMapMode_Read, 0, numbers_size, mapInfo);
 
@@ -282,12 +286,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 		uint32_t* buf = static_cast<uint32_t*>(wgpuBufferGetMappedRange(staging_buffer, 0, numbers_size));
 		assert(buf);
 
+		UE_LOG(LogTemp, Log, TEXT("collatz times: [%d, %d, %d, %d]"), buf[0], buf[1], buf[2], buf[3]);
+
+		wgpuBufferUnmap(staging_buffer);
+		wgpuCommandBufferRelease(command_buffer);
+		wgpuCommandEncoderRelease(command_encoder);
+		wgpuBindGroupRelease(bind_group);
+		wgpuBindGroupLayoutRelease(bind_group_layout);
+		wgpuComputePipelineRelease(compute_pipeline);
+		wgpuBufferRelease(storage_buffer);
+		wgpuBufferRelease(staging_buffer);
 		wgpuShaderModuleRelease(shader_module);
 	}
 
 	//release all memories used
 	void Shutdown()
 	{
+		wgpuQueueRelease(Queue);
 		wgpuDeviceRelease(Device);
 		wgpuAdapterRelease(Adapter);
 		wgpuInstanceRelease(Instance);
@@ -296,6 +311,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	WGPUInstance Instance = nullptr;
 	WGPUAdapter Adapter = nullptr;
 	WGPUDevice Device = nullptr;
+	WGPUQueue Queue = nullptr;
 };
 
 UWebGPUComponent::UWebGPUComponent(const FObjectInitializer& ObjectInitializer)
@@ -340,6 +356,8 @@ void UWebGPUComponent::Test()
 
 
 	Internal->InspectAdapter(Internal->Adapter);
+
+	Internal->RunShader();
 
 	Internal->Shutdown();
 
