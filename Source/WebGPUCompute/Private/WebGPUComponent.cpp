@@ -119,16 +119,23 @@ public:
 		assert(Queue);
 	}
 
-	//todo: export source and auto-bind
-	void RunShader(const FString& Source)
+	//Array In/out data bind shader, e.g. collatz count
+	void RunExampleShader(const FString& Source, const TArray<int32>& InData, TArray<int32>& OutData)
 	{
-		const char* SourceBuffer = TCHAR_TO_ANSI(*Source);
+		//Proper way of converting FString to char*
+		FTCHARToUTF8 Converter(*Source);
+		const char* SourceBuffer = Converter.Get();
+
 		WGPUShaderSourceWGSL sourceDesc = {};
 		sourceDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
 
-		uint32_t numbers[] = { 1, 2, 3, 4 };
-		uint32_t numbers_size = sizeof(numbers);
-		uint32_t numbers_length = numbers_size / sizeof(uint32_t);
+		//uint32_t numbers[] = { 1, 2, 3, 4 };
+		//uint32_t NumbersSize = sizeof(numbers);
+		//uint32_t NumbersLength = NumbersSize / sizeof(uint32_t);
+
+		const TArray<int32>& Numbers = InData; //{ 1, 2, 3, 4 };
+		int32 NumbersSize = Numbers.Num() * sizeof(int32);
+		int32 NumbersLength = Numbers.Num();
 
 		sourceDesc.code = { SourceBuffer, WGPU_STRLEN};
 
@@ -143,7 +150,7 @@ public:
 		WGPUBufferDescriptor stagingDesc = {};
 		stagingDesc.label = { "staging_buffer", WGPU_STRLEN };
 		stagingDesc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
-		stagingDesc.size = numbers_size;
+		stagingDesc.size = NumbersSize;
 		stagingDesc.mappedAtCreation = false;
 
 		WGPUBuffer staging_buffer = wgpuDeviceCreateBuffer(Device, &stagingDesc);
@@ -153,7 +160,7 @@ public:
 		WGPUBufferDescriptor storageDesc = {};
 		storageDesc.label = { "storage_buffer", WGPU_STRLEN };
 		storageDesc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
-		storageDesc.size = numbers_size;
+		storageDesc.size = NumbersSize;
 		storageDesc.mappedAtCreation = false;
 
 		WGPUBuffer storage_buffer = wgpuDeviceCreateBuffer(Device, &storageDesc);
@@ -180,7 +187,7 @@ public:
 		bindEntry.binding = 0;
 		bindEntry.buffer = storage_buffer;
 		bindEntry.offset = 0;
-		bindEntry.size = numbers_size;
+		bindEntry.size = NumbersSize;
 
 		WGPUBindGroupDescriptor bindGroupDesc = {};
 		bindGroupDesc.label = { "bind_group", WGPU_STRLEN };
@@ -208,12 +215,12 @@ public:
 		// --- Dispatch compute ---
 		wgpuComputePassEncoderSetPipeline(compute_pass_encoder, compute_pipeline);
 		wgpuComputePassEncoderSetBindGroup(compute_pass_encoder, 0, bind_group, 0, nullptr);
-		wgpuComputePassEncoderDispatchWorkgroups(compute_pass_encoder, numbers_length, 1, 1);
+		wgpuComputePassEncoderDispatchWorkgroups(compute_pass_encoder, NumbersLength, 1, 1);
 		wgpuComputePassEncoderEnd(compute_pass_encoder);
 		wgpuComputePassEncoderRelease(compute_pass_encoder);
 
 		// --- Copy buffer ---
-		wgpuCommandEncoderCopyBufferToBuffer(command_encoder, storage_buffer, 0, staging_buffer, 0, numbers_size);
+		wgpuCommandEncoderCopyBufferToBuffer(command_encoder, storage_buffer, 0, staging_buffer, 0, NumbersSize);
 
 		// --- Finish command buffer ---
 		WGPUCommandBufferDescriptor cmdBufDesc = {};
@@ -223,7 +230,7 @@ public:
 		assert(command_buffer);
 
 		// --- Write data to buffer ---
-		wgpuQueueWriteBuffer(Queue, storage_buffer, 0, &numbers, numbers_size);
+		wgpuQueueWriteBuffer(Queue, storage_buffer, 0, Numbers.GetData(), NumbersSize);
 
 		// --- Submit commands ---
 		wgpuQueueSubmit(Queue, 1, &command_buffer);
@@ -231,22 +238,32 @@ public:
 		// --- Map staging buffer ---
 		WGPUBufferMapCallbackInfo mapInfo = {};
 		mapInfo.callback = [](WGPUMapAsyncStatus status,
-			WGPUStringView message,
-			void* userdata1, void* userdata2)
-			{
-				UE_LOG(LogTemp, Log, TEXT(" buffer_map status=%#.8x"), status)
-			};
+		WGPUStringView message,
+		void* userdata1, void* userdata2)
+		{
+			UE_LOG(LogTemp, Log, TEXT(" buffer_map status=%#.8x"), status)
+		};
 
-		wgpuBufferMapAsync(staging_buffer, WGPUMapMode_Read, 0, numbers_size, mapInfo);
+		wgpuBufferMapAsync(staging_buffer, WGPUMapMode_Read, 0, NumbersSize, mapInfo);
 
 		// --- Poll for map completion ---
 		wgpuDevicePoll(Device, true, nullptr);
 
 		// --- Access mapped buffer ---
-		uint32_t* buf = static_cast<uint32_t*>(wgpuBufferGetMappedRange(staging_buffer, 0, numbers_size));
+		uint32_t* buf = static_cast<uint32_t*>(wgpuBufferGetMappedRange(staging_buffer, 0, NumbersSize));
 		assert(buf);
 
-		UE_LOG(LogTemp, Log, TEXT("collatz times: [%d, %d, %d, %d]"), buf[0], buf[1], buf[2], buf[3]);
+		//Set the out data
+		int32 NumElements = NumbersSize / sizeof(uint32_t);
+		OutData.Append(reinterpret_cast<int32*>(buf), NumElements);
+
+		FString Times;
+		for (auto& Element : OutData)
+		{
+			Times += FString::Printf(TEXT("%d,"), Element);
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("collatz times: [%s]"), *Times);
 
 		wgpuBufferUnmap(staging_buffer);
 		wgpuCommandBufferRelease(command_buffer);
@@ -385,14 +402,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 	FString Source = FString(RawSource);
 
-	Internal->RunShader(Source);
+	TArray<int32> Data = { 1,2,3,4 };
+	Internal->RunExampleShader(Source, Data, Data);
 
 	UE_LOG(LogTemp, Log, TEXT("## Test end. ##"));
 }
 
-void UWebGPUComponent::RunShader(const FString& ShaderSource)
+void UWebGPUComponent::RunShader(const FString& ShaderSource, const TArray<int32>& InData, TArray<int32>& OutData)
 {
-
 	if (!Internal->HasStarted())
 	{
 		Internal->Startup();
@@ -404,5 +421,5 @@ void UWebGPUComponent::RunShader(const FString& ShaderSource)
 		Internal->InspectAdapter(Internal->Adapter);
 	}
 
-	Internal->RunShader(ShaderSource);
+	Internal->RunExampleShader(ShaderSource, InData, OutData);
 }

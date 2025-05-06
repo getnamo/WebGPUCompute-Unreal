@@ -17,8 +17,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Utility")
 	void Test();
 
+	//Example shader with int array data in/out bind
+	//Todo: generalize data binding (auto generate binds)
 	UFUNCTION(BlueprintCallable, Category = "Utility")
-	void RunShader(const FString& ShaderSource);
+	void RunShader(const FString& ShaderSource, const TArray<int32>& InData, TArray<int32>& OutData);
 
 protected:
 	virtual void BeginPlay() override;
