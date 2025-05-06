@@ -1,5 +1,6 @@
 #include "WebGPUComponent.h"
-#include "webgpu/webgpu.h"
+#define WEBGPU_CPP_IMPLEMENTATION
+#include "webgpu/webgpu.hpp"
 
 UWebGPUComponent::UWebGPUComponent()
 {
@@ -42,10 +43,14 @@ void UWebGPUComponent::Test()
 
 	// Display the object (WGPUInstance is a simple pointer, it may be
 	// copied around without worrying about its size).
-	UE_LOG(LogTemp, Log, TEXT("WGPU instance: %d"), instance);
+	UE_LOG(LogTemp, Log, TEXT("WGPU instance: %p"), instance);
 
 	// We clean up the WebGPU instance
 	wgpuInstanceRelease(instance);
 
 	UE_LOG(LogTemp, Log, TEXT("Test end."));
+}
+
+void UWebGPUComponent::RunShader(const FString& ShaderSource)
+{
 }

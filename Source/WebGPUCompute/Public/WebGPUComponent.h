@@ -16,6 +16,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Utility")
 	void Test();
 
+	UFUNCTION(BlueprintCallable, Category = "Utility")
+	void RunShader(const FString& ShaderSource);
+
 protected:
 	virtual void BeginPlay() override;
 
