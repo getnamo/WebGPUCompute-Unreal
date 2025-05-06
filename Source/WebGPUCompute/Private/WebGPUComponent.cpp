@@ -5,7 +5,8 @@
 class FWebGPUInternal
 {
 public:
-	WGPUAdapter requestAdapterSync(WGPUInstance instance, WGPURequestAdapterOptions const* options) {
+	WGPUAdapter RequestAdapterSync(WGPUInstance instance, WGPURequestAdapterOptions const* options) 
+	{
 		// A simple structure holding the local information shared with the
 		// onAdapterRequestEnded callback.
 		struct UserData {
@@ -54,7 +55,8 @@ public:
 		return userData.adapter;
 	}
 
-	void inspectAdapter(WGPUAdapter adapter) {
+	void InspectAdapter(WGPUAdapter adapter) 
+	{
 		WGPULimits limits = {};
 		limits.nextInChain = nullptr;
 
@@ -66,41 +68,45 @@ public:
 			UE_LOG(LogTemp, Log, TEXT(" - maxTextureDimension2D: %u"), limits.maxTextureDimension2D);
 			UE_LOG(LogTemp, Log, TEXT(" - maxTextureDimension3D: %u"), limits.maxTextureDimension3D);
 			UE_LOG(LogTemp, Log, TEXT(" - maxTextureArrayLayers: %u"), limits.maxTextureArrayLayers);
+			UE_LOG(LogTemp, Log, TEXT(" - maxBufferSize: %u"), limits.maxBufferSize);
+			UE_LOG(LogTemp, Log, TEXT(" - maxComputeWorkgroupSizeX: %u"), limits.maxComputeWorkgroupSizeX);
+			UE_LOG(LogTemp, Log, TEXT(" - maxComputeWorkgroupSizeY: %u"), limits.maxComputeWorkgroupSizeY);
+			UE_LOG(LogTemp, Log, TEXT(" - maxComputeWorkgroupSizeZ: %u"), limits.maxComputeWorkgroupSizeZ);
 		}
-
-		std::vector<WGPUFeatureName> features;
-		
-		/*size_t featureCount = wgpuAdapterEnumerateFeatures(adapter, nullptr);
-		features.resize(featureCount);
-		wgpuAdapterEnumerateFeatures(adapter, features.data());
-
-		UE_LOG(LogTemp, Log, TEXT("Adapter features:"));
-		for (auto f : features) {
-			UE_LOG(LogTemp, Log, TEXT(" - 0x%X"), static_cast<uint32>(f));
-		}
-
-		WGPUAdapterProperties properties = {};
-		properties.nextInChain = nullptr;
-		wgpuAdapterGetProperties(adapter, &properties);
-
-		UE_LOG(LogTemp, Log, TEXT("Adapter properties:"));
-		UE_LOG(LogTemp, Log, TEXT(" - vendorID: %u"), properties.vendorID);
-		if (properties.vendorName) {
-			UE_LOG(LogTemp, Log, TEXT(" - vendorName: %s"), ANSI_TO_TCHAR(properties.vendorName));
-		}
-		if (properties.architecture) {
-			UE_LOG(LogTemp, Log, TEXT(" - architecture: %s"), ANSI_TO_TCHAR(properties.architecture));
-		}
-		UE_LOG(LogTemp, Log, TEXT(" - deviceID: %u"), properties.deviceID);
-		if (properties.name) {
-			UE_LOG(LogTemp, Log, TEXT(" - name: %s"), ANSI_TO_TCHAR(properties.name));
-		}
-		if (properties.driverDescription) {
-			UE_LOG(LogTemp, Log, TEXT(" - driverDescription: %s"), ANSI_TO_TCHAR(properties.driverDescription));
-		}
-		UE_LOG(LogTemp, Log, TEXT(" - adapterType: 0x%X"), static_cast<uint32>(properties.adapterType));
-		UE_LOG(LogTemp, Log, TEXT(" - backendType: 0x%X"), static_cast<uint32>(properties.backendType));*/
 	}
+
+	void Startup() 
+	{
+		// We create a descriptor
+		WGPUInstanceDescriptor desc = {};
+		desc.nextInChain = nullptr;
+
+		// We create the instance using this descriptor
+		Instance = wgpuCreateInstance(&desc);
+
+		// We can check whether there is actually an instance created
+		if (!Instance) 
+		{
+			UE_LOG(LogTemp, Error, TEXT("Could not initialize WebGPU!"));
+			return;
+		}
+
+		WGPURequestAdapterOptions adapterOpts = {};
+		adapterOpts.nextInChain = nullptr;
+
+		Adapter = RequestAdapterSync(Instance, &adapterOpts);
+	}
+	void Shutdown()
+	{
+		// We clean up the WebGPU instance
+		wgpuInstanceRelease(Instance);
+
+
+		wgpuAdapterRelease(Adapter);
+	}
+
+	WGPUInstance Instance = nullptr;
+	WGPUAdapter Adapter = nullptr;
 };
 
 UWebGPUComponent::UWebGPUComponent(const FObjectInitializer& ObjectInitializer)
@@ -132,38 +138,23 @@ void UWebGPUComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 
 void UWebGPUComponent::Test()
 {
-	UE_LOG(LogTemp, Log, TEXT("Test start."));
+	UE_LOG(LogTemp, Log, TEXT("## Test start. ##"));
 
 	//From: https://eliemichel.github.io/LearnWebGPU/getting-started/hello-webgpu.html#lit-6
 
-	// We create a descriptor
-	WGPUInstanceDescriptor desc = {};
-	desc.nextInChain = nullptr;
-
-	// We create the instance using this descriptor
-	WGPUInstance instance = wgpuCreateInstance(&desc);
-
-	// We can check whether there is actually an instance created
-	if (!instance) {
-		UE_LOG(LogTemp, Error, TEXT("Could not initialize WebGPU!"));
-		return;
-	}
+	
+	Internal->Startup();
 
 	// Display the object (WGPUInstance is a simple pointer, it may be
 	// copied around without worrying about its size).
-	UE_LOG(LogTemp, Log, TEXT("WGPU instance: %p"), instance);
+	UE_LOG(LogTemp, Log, TEXT("WGPU instance: %p"), Internal->Instance);
 
-	WGPURequestAdapterOptions adapterOpts = {};
-	adapterOpts.nextInChain = nullptr;
 
-	WGPUAdapter adapter = Internal->requestAdapterSync(instance, &adapterOpts);
+	Internal->InspectAdapter(Internal->Adapter);
 
-	Internal->inspectAdapter(adapter);
+	Internal->Shutdown();
 
-	// We clean up the WebGPU instance
-	wgpuInstanceRelease(instance);
-
-	UE_LOG(LogTemp, Log, TEXT("Test end."));
+	UE_LOG(LogTemp, Log, TEXT("## Test end. ##"));
 }
 
 void UWebGPUComponent::RunShader(const FString& ShaderSource)
