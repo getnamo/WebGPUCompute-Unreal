@@ -3090,12 +3090,6 @@ Adapter Instance::requestAdapter(const RequestAdapterOptions& options) {
 	callbackInfo.mode = CallbackMode::AllowSpontaneous;
 	requestAdapter(options, callbackInfo);
 
-#if __EMSCRIPTEN__
-	while (!context.requestEnded) {
-		emscripten_sleep(50);
-	}
-#endif
-
 	assert(context.requestEnded);
 	return context.adapter;
 }
@@ -3128,12 +3122,6 @@ Device Adapter::requestDevice(const DeviceDescriptor& descriptor) {
 	};
 	callbackInfo.mode = CallbackMode::AllowSpontaneous;
 	requestDevice(descriptor, callbackInfo);
-
-#if __EMSCRIPTEN__
-	while (!context.requestEnded) {
-		emscripten_sleep(50);
-	}
-#endif
 
 	assert(context.requestEnded);
 	return context.device;
