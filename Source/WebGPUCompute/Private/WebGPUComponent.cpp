@@ -22,9 +22,9 @@ void UWebGPUComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 
 void UWebGPUComponent::Test()
 {
-	UE_LOG(LogTemp, Log, TEXT("Test start.");
+	UE_LOG(LogTemp, Log, TEXT("Test start."));
 
 	//moar logic here
 
-	UE_LOG(LogTemp, Log, TEXT("Test end.");
+	UE_LOG(LogTemp, Log, TEXT("Test end."));
 }
