@@ -176,18 +176,22 @@ public:
 	{
 
 		//Human readable error handling
+		ErrorUserData ErrorScopeUserData;
+
 		WGPUPopErrorScopeCallbackInfo CallbackInfo;
-		CallbackInfo.nextInChain = nullptr;
-		CallbackInfo.userdata1 = nullptr; //todo pass through callback info for errors
-		CallbackInfo.callback = [](WGPUPopErrorScopeStatus status,
-			WGPUErrorType type,
-			WGPUStringView message,
-			void* userdata1,
-			void* userdata2)
+		CallbackInfo.userdata1 = &ErrorScopeUserData; //todo pass through callback info for errors
+		CallbackInfo.callback = [](WGPUPopErrorScopeStatus Status,
+			WGPUErrorType ErrorType,
+			WGPUStringView Message,
+			void* UserData1,
+			void* UserData2)
 		{
-			if (message.data)
+			ErrorUserData& ErrorScopeUserData = *reinterpret_cast<ErrorUserData*>(UserData1);
+			ErrorScopeUserData.bDidError = ErrorType != WGPUErrorType_NoError;
+
+			if (Message.data && ErrorScopeUserData.bDidError)
 			{
-				UE_LOG(LogTemp, Error, TEXT("Error: %s"), UTF8_TO_TCHAR(message.data));
+				UE_LOG(LogTemp, Error, TEXT("%s"), UTF8_TO_TCHAR(Message.data));
 			}
 		};
 
@@ -196,7 +200,7 @@ public:
 		const char* SourceBuffer = Converter.Get();
 
 		//Enabling validation catching, makes it caught here instead of uncaught on device
-		//wgpuDevicePushErrorScope(Device, WGPUErrorFilter_Validation);
+		wgpuDevicePushErrorScope(Device, WGPUErrorFilter_Validation);
 		//wgpuDevicePushErrorScope(Device, WGPUErrorFilter_OutOfMemory);
 		//wgpuDevicePushErrorScope(Device, WGPUErrorFilter_Internal);
 		
@@ -213,10 +217,6 @@ public:
 
 		SourceDesc.code = { SourceBuffer, WGPU_STRLEN};
 
-
-		struct UserData {
-			bool bDidError = false;
-		} CompilationUserData;
 
 		//Top level
 		WGPUShaderModuleDescriptor ShaderDesc = {};
@@ -245,14 +245,14 @@ public:
 		//	//}
 		//};
 
-		//This call creates a panic, it looks like we need to capture this via the any error catch instead
+		//This call creates a panic, it looks like we need to capture this via error scopes
 		//wgpuShaderModuleGetCompilationInfo(ShaderModule, CompilationCallbackInfo);
 
-		//pop it here to find out if we errored
-		//wgpuDevicePopErrorScope(Device, CallbackInfo);
+		//pop it here to find out if we errored on compilation
+		wgpuDevicePopErrorScope(Device, CallbackInfo);
 
-		//Only AnyErrorUserData.bDidError actually trips the compilation process
-		if (!ShaderModule || CompilationUserData.bDidError || AnyErrorUserData.bDidError)
+		//AnyErrorUserData or ErrorScopeUserData depending on whether error scope is set
+		if (!ShaderModule || AnyErrorUserData.bDidError || ErrorScopeUserData.bDidError)
 		{
 			UE_LOG(LogTemp, Log, TEXT("ShaderModule Failed to compile"));
 
