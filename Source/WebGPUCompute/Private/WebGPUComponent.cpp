@@ -254,7 +254,7 @@ public:
 		//AnyErrorUserData or ErrorScopeUserData depending on whether error scope is set
 		if (!ShaderModule || AnyErrorUserData.bDidError || ErrorScopeUserData.bDidError)
 		{
-			UE_LOG(LogTemp, Log, TEXT("ShaderModule Failed to compile"));
+			UE_LOG(LogTemp, Warning, TEXT("ShaderModule Failed to compile"));
 
 			if (ShaderModule)
 			{
