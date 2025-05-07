@@ -5,15 +5,25 @@
 class FWebGPUInternal
 {
 public:
+
+	struct ErrorUserData 
+	{
+		bool bDidError = false;
+	};
+	ErrorUserData AnyErrorUserData;
+
+	//We use synchronous variants because it's intended to run on a background/non-blocking thread
+	//in production (not yet implemented)
 	WGPUAdapter RequestAdapterSync(WGPUInstance instance, WGPURequestAdapterOptions const* options) 
 	{
 		// A simple structure holding the local information shared with the
 		// onAdapterRequestEnded callback.
-		struct UserData {
-			WGPUAdapter adapter = nullptr;
-			bool requestEnded = false;
+		struct UserData 
+		{
+			WGPUAdapter Adapter = nullptr;
+			bool bRequestEnded = false;
 		};
-		UserData userData;
+		UserData AdapterUserData;
 
 		// Callback called by wgpuInstanceRequestAdapter when the request returns
 		// This is a C++ lambda function, but could be any function defined in the
@@ -23,24 +33,25 @@ public:
 		// is to convey what we want to capture through the pUserData pointer,
 		// provided as the last argument of wgpuInstanceRequestAdapter and received
 		// by the callback as its last argument.
-		auto onAdapterRequestEnded = [](WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void* pUserData, void* pUserData2) {
-			UserData& userData = *reinterpret_cast<UserData*>(pUserData);
-			if (status == WGPURequestAdapterStatus_Success) 
+		auto onAdapterRequestEnded = [](WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void* pUserData, void* pUserData2) 
+		{
+			UserData& AdapterUserData = *reinterpret_cast<UserData*>(pUserData);
+			if (status == WGPURequestAdapterStatus_Success)
 			{
-				userData.adapter = adapter;
+				AdapterUserData.Adapter = adapter;
 			}
-			else 
+			else
 			{
 				UE_LOG(LogTemp, Error, TEXT("Could not get WebGPU adapter: %hs"), message.data);
 			}
-			userData.requestEnded = true;
+			AdapterUserData.bRequestEnded = true;
 		};
 
 		WGPURequestAdapterCallbackInfo callbackInfo;
 		callbackInfo.nextInChain = nullptr;
 		callbackInfo.mode = WGPUCallbackMode_WaitAnyOnly;
 		callbackInfo.callback = onAdapterRequestEnded;
-		callbackInfo.userdata1 = &userData;
+		callbackInfo.userdata1 = &AdapterUserData;
 
 
 		// Call to the WebGPU request adapter procedure
@@ -50,9 +61,12 @@ public:
 			callbackInfo
 		);
 
-		FPlatformProcess::ConditionalSleep([&userData] { return userData.requestEnded; }, 0.01f);
+		FPlatformProcess::ConditionalSleep([&AdapterUserData]
+		{ 
+			return AdapterUserData.bRequestEnded;
+		}, 0.01f);
 
-		return userData.adapter;
+		return AdapterUserData.Adapter;
 	}
 
 	WGPUDevice RequestDeviceSync(WGPUAdapter InAdapter, WGPUDeviceDescriptor const* descriptor) {
@@ -62,18 +76,38 @@ public:
 		CallbackInfo.userdata1 = &TempDevice;
 		CallbackInfo.callback = [](
 			WGPURequestDeviceStatus Status, WGPUDevice InDevice, WGPUStringView Message,
-			void* UserData1, void* UserData2)
+		void* UserData1, void* UserData2)
 		{
 			*(WGPUDevice*)UserData1 = InDevice;
 		};
 
-		wgpuAdapterRequestDevice(InAdapter, NULL, CallbackInfo);
+		//This is needed to receive errors instead of panics
+		WGPUUncapturedErrorCallbackInfo UncapturedErrorCallbackInfo = {};
+		UncapturedErrorCallbackInfo.nextInChain = nullptr;
+		UncapturedErrorCallbackInfo.userdata1 = &AnyErrorUserData;
+
+		UncapturedErrorCallbackInfo.callback = [](
+			WGPUDevice const* device,
+			WGPUErrorType type, WGPUStringView message,
+			void* userdata1, void* userdata2)
+		{
+			ErrorUserData& AnyErrorUserData = *reinterpret_cast<ErrorUserData*>(userdata1);
+			AnyErrorUserData.bDidError = true;
+			UE_LOG(LogTemp, Error, TEXT("Uncaught error: %s"), UTF8_TO_TCHAR(message.data));
+		};
+
+		WGPUDeviceDescriptor DeviceDescriptor = {};
+		DeviceDescriptor.requiredLimits = nullptr;
+		//DeviceDescriptor.deviceLostCallbackInfo =	//we don't handle this case gracefully yet
+		DeviceDescriptor.uncapturedErrorCallbackInfo = UncapturedErrorCallbackInfo;
+
+		wgpuAdapterRequestDevice(InAdapter, &DeviceDescriptor, CallbackInfo);
 		assert(TempDevice);
 
 		return TempDevice;
 	}
 
-	void InspectAdapter(WGPUAdapter adapter) 
+	void InspectAdapter(WGPUAdapter adapter)
 	{
 		WGPULimits limits = {};
 		limits.nextInChain = nullptr;
@@ -93,7 +127,7 @@ public:
 		}
 	}
 
-	void Startup() 
+	void Startup()
 	{
 		// We create a descriptor
 		WGPUInstanceDescriptor desc = {};
@@ -103,7 +137,7 @@ public:
 		Instance = wgpuCreateInstance(&desc);
 
 		// We can check whether there is actually an instance created
-		if (!Instance) 
+		if (!Instance)
 		{
 			UE_LOG(LogTemp, Error, TEXT("Could not initialize WebGPU!"));
 			return;
@@ -117,35 +151,122 @@ public:
 
 		Queue = wgpuDeviceGetQueue(Device);
 		assert(Queue);
+
+		wgpuSetLogCallback([](WGPULogLevel level, WGPUStringView message,
+			void* userdata)
+		{
+			if (level == WGPULogLevel_Error)
+			{
+				UE_LOG(LogTemp, Error, TEXT("%hs"), message.data);
+			}
+			else if (level == WGPULogLevel_Warn)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("%hs"), message.data);
+			}
+			else
+			{ 
+				UE_LOG(LogTemp, Log, TEXT("%hs"), message.data);
+			}
+		}, nullptr);
 	}
 
 	//Array In/out data bind shader, e.g. collatz count
 	//largely from: https://github.com/gfx-rs/wgpu-native/blob/trunk/examples/compute/main.c
 	void RunExampleShader(const FString& Source, const TArray<int32>& InData, TArray<int32>& OutData)
 	{
+
+		//Human readable error handling
+		WGPUPopErrorScopeCallbackInfo CallbackInfo;
+		CallbackInfo.nextInChain = nullptr;
+		CallbackInfo.userdata1 = nullptr; //todo pass through callback info for errors
+		CallbackInfo.callback = [](WGPUPopErrorScopeStatus status,
+			WGPUErrorType type,
+			WGPUStringView message,
+			void* userdata1,
+			void* userdata2)
+		{
+			if (message.data)
+			{
+				UE_LOG(LogTemp, Error, TEXT("Error: %s"), UTF8_TO_TCHAR(message.data));
+			}
+		};
+
 		//Proper way of converting FString to char*
 		FTCHARToUTF8 Converter(*Source);
 		const char* SourceBuffer = Converter.Get();
+
+		//Enabling validation catching, makes it caught here instead of uncaught on device
+		//wgpuDevicePushErrorScope(Device, WGPUErrorFilter_Validation);
+		//wgpuDevicePushErrorScope(Device, WGPUErrorFilter_OutOfMemory);
+		//wgpuDevicePushErrorScope(Device, WGPUErrorFilter_Internal);
+		
 
 		WGPUShaderSourceWGSL SourceDesc = {};
 		SourceDesc.chain.next = nullptr;
 		SourceDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
 
-		//uint32_t numbers[] = { 1, 2, 3, 4 };
-		//uint32_t NumbersSize = sizeof(numbers);
-		//uint32_t NumbersLength = NumbersSize / sizeof(uint32_t);
 
-		const TArray<int32>& Numbers = InData; //{ 1, 2, 3, 4 };
+		//NB: shader technically uses uint32_t, but this is compatible for early tests
+		const TArray<int32>& Numbers = InData; //{ 1, 2, 3, 4 }; //fixed data example
 		int32 NumbersSize = Numbers.Num() * sizeof(int32);
 		int32 NumbersLength = Numbers.Num();
 
 		SourceDesc.code = { SourceBuffer, WGPU_STRLEN};
 
+
+		struct UserData {
+			bool bDidError = false;
+		} CompilationUserData;
+
+		//Top level
 		WGPUShaderModuleDescriptor ShaderDesc = {};
 		ShaderDesc.label = { "shader.wgsl", WGPU_STRLEN };
 		ShaderDesc.nextInChain = reinterpret_cast<const WGPUChainedStruct*>(&SourceDesc);
 
+		// --- Create shader module (this is the compilation call) ---
 		WGPUShaderModule ShaderModule = wgpuDeviceCreateShaderModule(Device, &ShaderDesc);
+
+		//This callback for catching compilation errors, but unfortunate doesn't work in our context
+		//WGPUCompilationInfoCallbackInfo CompilationCallbackInfo = {};
+		//CompilationCallbackInfo.nextInChain = nullptr;
+		//CompilationCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
+		//CompilationCallbackInfo.userdata1 = &CompilationUserData;
+		//CompilationCallbackInfo.callback = [](WGPUCompilationInfoRequestStatus status,
+		//	struct WGPUCompilationInfo const* compilationInfo,
+		//	void* userdata1, void* userdata2)
+		//{
+		//	UserData& CompilationUserData = *reinterpret_cast<UserData*>(userdata1);
+		//	CompilationUserData.bDidError = status != WGPUCompilationInfoRequestStatus_Success;
+
+		//	//for (int32 i = 0; i < compilationInfo->messageCount; i++)
+		//	//{
+		//	//	WGPUCompilationMessage message = compilationInfo->messages[i];
+		//	//	UE_LOG(LogTemp, Log, TEXT("%hs at %d"), message.message.data, message.lineNum);
+		//	//}
+		//};
+
+		//This call creates a panic, it looks like we need to capture this via the any error catch instead
+		//wgpuShaderModuleGetCompilationInfo(ShaderModule, CompilationCallbackInfo);
+
+		//pop it here to find out if we errored
+		//wgpuDevicePopErrorScope(Device, CallbackInfo);
+
+		//Only AnyErrorUserData.bDidError actually trips the compilation process
+		if (!ShaderModule || CompilationUserData.bDidError || AnyErrorUserData.bDidError)
+		{
+			UE_LOG(LogTemp, Log, TEXT("ShaderModule Failed to compile"));
+
+			if (ShaderModule)
+			{
+				wgpuShaderModuleRelease(ShaderModule);
+			}
+
+			//Reset the error trigger for future compiles
+			AnyErrorUserData.bDidError = false;
+			return;
+		}
+
+		//wgpuDevicePopErrorScope(Device, CallbackInfo);
 		assert(ShaderModule);
 
 		// --- Create staging buffer ---
@@ -265,7 +386,11 @@ public:
 			Times += FString::Printf(TEXT("%d,"), Element);
 		}
 
-		UE_LOG(LogTemp, Log, TEXT("collatz times: [%s]"), *Times);
+		UE_LOG(LogTemp, Log, TEXT("Output: [%s]"), *Times);
+
+		//wgpuDevicePopErrorScope(Device, CallbackInfo);
+		//wgpuDevicePopErrorScope(Device, CallbackInfo);
+		//wgpuDevicePopErrorScope(Device, CallbackInfo);
 
 		wgpuBufferUnmap(StagingBuffer);
 		wgpuCommandBufferRelease(CommandBuffer);
