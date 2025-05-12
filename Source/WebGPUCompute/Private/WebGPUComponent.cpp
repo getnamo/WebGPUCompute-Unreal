@@ -359,20 +359,21 @@ public:
 		wgpuQueueSubmit(Queue, 1, &CommandBuffer);
 
 		// --- Map staging buffer ---
-		WGPUBufferMapCallbackInfo mapInfo = {};
-		mapInfo.callback = [](WGPUMapAsyncStatus status,
+		WGPUBufferMapCallbackInfo ReadMapInfo = {};
+		ReadMapInfo.callback = [](WGPUMapAsyncStatus status,
 		WGPUStringView message,
 		void* userdata1, void* userdata2)
 		{
 			UE_LOG(LogTemp, Log, TEXT(" buffer_map status=%#.8x"), status)
 		};
 
-		wgpuBufferMapAsync(StagingBuffer, WGPUMapMode_Read, 0, NumbersSize, mapInfo);
+		wgpuBufferMapAsync(StagingBuffer, WGPUMapMode_Read, 0, NumbersSize, ReadMapInfo);
 
 		// --- Poll for map completion ---
 		wgpuDevicePoll(Device, true, nullptr);
 
-		// --- Access mapped buffer ---
+		// --- Access mapped buffer --- 
+		// NB: Get a pointer to wherever the driver mapped the GPU memory to the RAM
 		uint32_t* buf = static_cast<uint32_t*>(wgpuBufferGetMappedRange(StagingBuffer, 0, NumbersSize));
 		assert(buf);
 
