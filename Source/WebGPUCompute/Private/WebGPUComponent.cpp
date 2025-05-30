@@ -1,6 +1,7 @@
 #include "WebGPUComponent.h"
 #define WEBGPU_CPP_IMPLEMENTATION
 #include "webgpu/webgpu.hpp"
+#include "FlopBenchmark.h"
 
 class FWebGPUInternal
 {
@@ -549,4 +550,20 @@ void UWebGPUComponent::RunShader(const FString& ShaderSource, const TArray<int32
 	}
 
 	Internal->RunExampleShader(ShaderSource, InData, OutData);
+}
+
+
+void UWebGPUComponent::BenchmarkFlops(int32 Threads, int64 Iterations, bool bTestAVX)
+{
+	FFlopBenchmark Bench;
+
+	if (bTestAVX)
+	{
+		Bench.BenchmarkAVX2(Iterations);
+	}
+	else
+	{
+		Bench.BenchmarkCPUScalar(Threads, Iterations);
+	}
+	
 }
