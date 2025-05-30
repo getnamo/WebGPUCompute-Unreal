@@ -18,7 +18,10 @@ public:
 	void Test();
 
 	UFUNCTION(BlueprintCallable, Category = "Utility")
-	void BenchmarkFlops(int32 Threads = 1, int64 Iterations = 1000000, bool bTestAVX = false);
+	void PrintCPUInfo();
+
+	UFUNCTION(BlueprintCallable, Category = "Utility")
+	void BenchmarkFlops(int32 Threads = 1, int64 Iterations = 1000000, bool bTestAVX = false, bool bAVX512 = false);
 
 	//Example shader with int array data in/out bind
 	//Todo: generalize data binding (auto generate binds)

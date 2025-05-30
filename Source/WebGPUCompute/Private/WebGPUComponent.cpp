@@ -553,13 +553,27 @@ void UWebGPUComponent::RunShader(const FString& ShaderSource, const TArray<int32
 }
 
 
-void UWebGPUComponent::BenchmarkFlops(int32 Threads, int64 Iterations, bool bTestAVX)
+void UWebGPUComponent::PrintCPUInfo()
+{
+	FFlopBenchmark Bench;
+
+	Bench.PrintCPUIDInfo();
+}
+
+void UWebGPUComponent::BenchmarkFlops(int32 Threads, int64 Iterations, bool bTestAVX, bool bAVX512)
 {
 	FFlopBenchmark Bench;
 
 	if (bTestAVX)
 	{
-		Bench.BenchmarkAVX2(Iterations);
+		if (bAVX512)
+		{
+			Bench.BenchmarkAVX512(Iterations);
+		}
+		else
+		{
+			Bench.BenchmarkAVX2(Iterations);
+		}
 	}
 	else
 	{
