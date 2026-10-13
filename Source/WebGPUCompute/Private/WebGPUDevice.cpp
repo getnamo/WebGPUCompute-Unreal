@@ -164,7 +164,15 @@ bool FWebGPUDevice::Initialize(const FWebGPUDeviceOptions& Options)
 	const bool bHaveLimits = wgpuAdapterGetLimits(Adapter, &Limits) == WGPUStatus_Success;
 	Limits.nextInChain = nullptr;
 
+	// Native use: full-resolution GPU timestamps (Dawn quantizes them by default, as browsers must)
+	const char* DisabledToggles[] = { "timestamp_quantization" };
+	WGPUDawnTogglesDescriptor Toggles = {};
+	Toggles.chain.sType = WGPUSType_DawnTogglesDescriptor;
+	Toggles.disabledToggleCount = UE_ARRAY_COUNT(DisabledToggles);
+	Toggles.disabledToggles = DisabledToggles;
+
 	WGPUDeviceDescriptor DeviceDesc = WGPU_DEVICE_DESCRIPTOR_INIT;
+	DeviceDesc.nextInChain = &Toggles.chain;
 	DeviceDesc.label = ToView("WebGPUCompute");
 	DeviceDesc.requiredFeatureCount = RequiredFeatures.Num();
 	DeviceDesc.requiredFeatures = RequiredFeatures.GetData();
@@ -180,6 +188,10 @@ bool FWebGPUDevice::Initialize(const FWebGPUDeviceOptions& Options)
 		if (Reason != WGPUDeviceLostReason_Destroyed && Reason != WGPUDeviceLostReason_CallbackCancelled)
 		{
 			UE_LOG(LogWebGPU, Error, TEXT("WebGPU device lost (reason %d): %s"), (int32)Reason, *FWebGPUDevice::ToFString(Message));
+			if (Self->LostHandler)
+			{
+				Self->LostHandler();
+			}
 		}
 	};
 

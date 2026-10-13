@@ -13,6 +13,12 @@ struct FWebGPUDeviceOptions
 
 	/** Request shared texture/fence features when the adapter supports them. */
 	bool bRequestInteropFeatures = true;
+
+	/**
+	 * FWebGPUContext worker: after a submit with results pending, poll Dawn without sleeping for this long
+	 * before falling back to 1 ms sleeps. Trades a little CPU for sub-millisecond readback latency. 0 disables.
+	 */
+	float BusyPollMilliseconds = 2.0f;
 };
 
 struct FWebGPUCompileMessage
@@ -33,9 +39,15 @@ public:
 	~FWebGPUDevice();
 
 	bool Initialize(const FWebGPUDeviceOptions& Options = FWebGPUDeviceOptions());
+
+	/** Called (from any thread) when the device is lost for a reason other than Shutdown. Set before Initialize. */
+	void SetLostHandler(TFunction<void()>&& Handler) { LostHandler = MoveTemp(Handler); }
 	void Shutdown();
 
 	bool IsValid() const { return Device != nullptr && !bLost; }
+
+	/** True once the device was lost (TDR, driver reset, ForceLoss). A lost device never recovers; make a new one. */
+	bool IsLost() const { return bLost; }
 
 	WGPUInstance GetInstance() const { return Instance; }
 	WGPUAdapter GetAdapter() const { return Adapter; }
@@ -78,4 +90,5 @@ private:
 	FString AdapterDescription;
 	bool bUsingRHIAdapter = false;
 	std::atomic<bool> bLost = false;
+	TFunction<void()> LostHandler;
 };
