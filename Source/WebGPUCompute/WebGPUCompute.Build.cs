@@ -31,7 +31,7 @@ public class WebGPUCompute : ModuleRules
 			}
 			);
 
-		// Dawn (WebGPU), fetched by Tools/FetchDawn.ps1
+		// Dawn (WebGPU), built from source by Tools/BuildDawn.ps1
 		PublicIncludePaths.Add(Path.Combine(DawnPath, "include"));
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
@@ -39,12 +39,23 @@ public class WebGPUCompute : ModuleRules
 			string DawnLib = Path.Combine(DawnPath, "lib", "Win64", "webgpu_dawn.lib");
 			if (!File.Exists(DawnLib))
 			{
-				throw new BuildException("Dawn not found at " + DawnLib + ". Run Plugins/WebGPUCompute-Unreal/Tools/FetchDawn.ps1 first.");
+				throw new BuildException("Dawn not found at " + DawnLib + ". Run Plugins/WebGPUCompute-Unreal/Tools/BuildDawn.ps1 first.");
 			}
 
 			// Static monolithic Dawn (/MD, _ITERATOR_DEBUG_LEVEL=0, matches UE)
 			PublicAdditionalLibraries.Add(DawnLib);
 			PublicSystemLibraries.AddRange(new string[] { "user32.lib", "dxguid.lib", "onecore_apiset.lib" });
+
+			// DXC, loaded by Dawn at runtime from the directory of the module that contains it
+			string DawnBinaries = Path.Combine(DawnPath, "bin", "Win64");
+			foreach (string DxcDll in new string[] { "dxcompiler.dll", "dxil.dll" })
+			{
+				string DxcPath = Path.Combine(DawnBinaries, DxcDll);
+				if (File.Exists(DxcPath))
+				{
+					RuntimeDependencies.Add("$(BinaryOutputDir)/" + DxcDll, DxcPath);
+				}
+			}
 
 			// D3D12 interop: shared textures/fences between UE's D3D12 RHI and Dawn's D3D12 device
 			PrivateDependencyModuleNames.Add("D3D12RHI");

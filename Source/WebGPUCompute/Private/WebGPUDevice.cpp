@@ -206,6 +206,22 @@ bool FWebGPUDevice::Initialize(const FWebGPUDeviceOptions& Options)
 
 	if (!Wait(wgpuAdapterRequestDevice(Adapter, &DeviceDesc, DeviceCallback)) || !DeviceResult.Device)
 	{
+		// f16/subgroups need DXC (dxcompiler.dll next to this module); retry without them so FXC can be used
+		const int32 Removed = RequiredFeatures.RemoveAll([](WGPUFeatureName Feature)
+		{
+			return Feature == WGPUFeatureName_ShaderF16 || Feature == WGPUFeatureName_Subgroups;
+		});
+		if (Removed > 0)
+		{
+			UE_LOG(LogWebGPU, Warning, TEXT("WebGPU device creation failed (%s); retrying without f16/subgroups"), *DeviceResult.Message);
+			DeviceDesc.requiredFeatureCount = RequiredFeatures.Num();
+			DeviceDesc.requiredFeatures = RequiredFeatures.GetData();
+			DeviceResult = FDeviceResult();
+			Wait(wgpuAdapterRequestDevice(Adapter, &DeviceDesc, DeviceCallback));
+		}
+	}
+	if (!DeviceResult.Device)
+	{
 		UE_LOG(LogWebGPU, Error, TEXT("Could not create a WebGPU device: %s"), *DeviceResult.Message);
 		Shutdown();
 		return false;
