@@ -99,6 +99,20 @@ Synchronization uses GPU fences, so neither the game thread nor the render threa
 
 Blueprint: **Create WebGPU Texture**, **Create WebGPU Texture From Render Target**, the texture's **Begin Access / End Access / Write Bytes / Write Floats**, the kernel's **Set Texture By Name / Set Sampler By Name**, and **Create WebGPU Readback Stream For Texture** + **Capture Texture**.
 
+### Audio
+
+- **Audio into kernels:** `FWebGPUAudioInput` collects interleaved audio from any thread into chunks and writes them into a GPU ring buffer through an upload stream.
+  - A small cursor buffer (WGSL struct `WebGPUAudioRing`) tells kernels where the newest frames are.
+  - `OnChunk` runs on the pushing thread after each chunk, so per-chunk analysis can be dispatched right there.
+  - `MakeSubmixListener()` feeds it from any submix.
+  - In Blueprint, **WebGPU Audio Input** is a component that listens to a submix (the main output by default) or takes **Push Audio**. It offers **Get Ring Buffer**, **Get Cursor Buffer**, and an **On Audio** event each tick with the frames that arrived.
+- **Audio out of kernels:** **WebGPU Synth** is a synth component that plays what a WGSL kernel generates.
+  - The kernel fills blocks: it binds `block` (`WebGPUAudioBlock`: FirstFrame, Frames, Channels, SampleRate, declared for it) and `samples` (interleaved `array<f32>`).
+  - The audio thread keeps enough blocks queued for the mixer's callbacks plus a couple more, so the game thread is never involved.
+  - **Set Kernel Source** swaps the kernel during playback; the old one plays until the new one compiles.
+  - **Get Kernel** binds extra inputs, such as a voices buffer.
+  - In C++ the same generator is `FWebGPUAudioGenerator`, usable from any audio callback.
+
 See https://github.com/getnamo/WebGPUCompute-Unreal/issues/1 for tracking on initial usable build.
 
 [Discord Server](https://discord.gg/qfJUyxaW4s)

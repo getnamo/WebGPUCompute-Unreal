@@ -20,6 +20,7 @@ public class WebGPUCompute : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"AudioMixer",
 			}
 			);
 
