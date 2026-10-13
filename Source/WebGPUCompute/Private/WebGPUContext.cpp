@@ -134,6 +134,10 @@ TSharedPtr<FWebGPUContext> FWebGPUBuffer::GetContext() const
 
 FWebGPUBuffer::~FWebGPUBuffer()
 {
+	if (TSharedPtr<FWebGPUContext> Owner = Context.Pin())
+	{
+		Owner->CountBuffer(*this, false);
+	}
 	if (!Handle)
 	{
 		return;
@@ -225,6 +229,10 @@ void FWebGPUKernel::ReleaseGPU()
 
 FWebGPUKernel::~FWebGPUKernel()
 {
+	if (TSharedPtr<FWebGPUContext> Owner = Context.Pin())
+	{
+		Owner->CountKernel(*this, false);
+	}
 	if (!Pipeline && BindGroups.Num() == 0)
 	{
 		return;
@@ -446,7 +454,39 @@ FWebGPUStats FWebGPUContext::GetStats() const
 	Stats.BytesRead = StatBytesRead;
 	Stats.Readbacks = StatReadbacks;
 	Stats.DeviceGeneration = (int32)DeviceGeneration;
+	Stats.LiveBuffers = StatLiveBuffers;
+	Stats.LiveBufferBytes = StatLiveBufferBytes;
+	Stats.LiveKernels = StatLiveKernels;
+	Stats.LiveTextures = StatLiveTextures;
 	return Stats;
+}
+
+void FWebGPUContext::CountBuffer(FWebGPUBuffer& Buffer, bool bAlive)
+{
+	if (bAlive != Buffer.bCounted)
+	{
+		Buffer.bCounted = bAlive;
+		StatLiveBuffers += bAlive ? 1 : -1;
+		StatLiveBufferBytes += bAlive ? (int64)Buffer.Size : -(int64)Buffer.Size;
+	}
+}
+
+void FWebGPUContext::CountKernel(FWebGPUKernel& Kernel, bool bAlive)
+{
+	if (bAlive != Kernel.bCounted)
+	{
+		Kernel.bCounted = bAlive;
+		StatLiveKernels += bAlive ? 1 : -1;
+	}
+}
+
+void FWebGPUContext::CountTexture(FWebGPUTexture& Texture, bool bAlive)
+{
+	if (bAlive != Texture.bCounted)
+	{
+		Texture.bCounted = bAlive;
+		StatLiveTextures += bAlive ? 1 : -1;
+	}
 }
 
 // Public commands
@@ -458,6 +498,7 @@ TSharedRef<FWebGPUBuffer> FWebGPUContext::CreateBuffer(uint64 Size, EWebGPUBuffe
 	Buffer->Size = Size;
 	Buffer->Usage = Usage;
 	Buffer->Label = Label.IsEmpty() ? TEXT("WebGPUBuffer") : Label;
+	CountBuffer(*Buffer, true);
 
 	Enqueue([this, Buffer]()
 	{
@@ -481,6 +522,7 @@ TSharedRef<FWebGPUKernel> FWebGPUContext::CreateKernel(const FWebGPUKernelDesc& 
 {
 	TSharedRef<FWebGPUKernel> Kernel = MakeShared<FWebGPUKernel>();
 	Kernel->Context = AsShared();
+	CountKernel(*Kernel, true);
 	Kernel->EntryPoint = Desc.EntryPoint;
 	Kernel->Label = Desc.Label.IsEmpty() ? Desc.EntryPoint : Desc.Label;
 	Kernel->SourceFile = Desc.SourceFile;
@@ -698,6 +740,7 @@ TSharedPtr<FWebGPUBuffer> FWebGPUContext::CreateStructBuffer(const UScriptStruct
 	Buffer->Usage = Usage;
 	Buffer->Label = Label.IsEmpty() ? Struct->GetName() : Label;
 	Buffer->ElementLayout = Layout;
+	CountBuffer(*Buffer, true);
 
 	Enqueue([this, Buffer]()
 	{

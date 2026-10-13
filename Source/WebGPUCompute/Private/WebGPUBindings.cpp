@@ -84,6 +84,21 @@ void UWebGPUBindings::SetVector(const FString& Name, FVector4 Value)
 	}
 }
 
+void UWebGPUBindings::Release()
+{
+	for (const TPair<FString, TObjectPtr<UWebGPUBuffer>>& Pair : Buffers)
+	{
+		// Only the buffers this set created (Create Buffer); others belong to whoever made them
+		if (Pair.Value && Pair.Value->GetOuter() == this)
+		{
+			Pair.Value->Release();
+		}
+	}
+	Buffers.Empty();
+	Textures.Empty();
+	Native.Reset();
+}
+
 UWebGPUBuffer* UWebGPUBindings::GetBuffer(const FString& Name) const
 {
 	const TObjectPtr<UWebGPUBuffer>* Found = Buffers.Find(Name);

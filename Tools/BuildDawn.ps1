@@ -115,20 +115,39 @@ $CMakeArgs = @(
 )
 
 New-Item -ItemType Directory -Force $WorkDir | Out-Null
-$BuildScript = Join-Path $WorkDir 'build-dawn.cmd'
 $GitDir = Split-Path -Parent $Git
-Set-Content -Path $BuildScript -Encoding ASCII -Value @"
-@echo off
-call "$VcVars" x64 $WindowsSdkVersion -vcvars_ver=$MsvcVersion || exit /b 1
-set "PATH=$GitDir;%PATH%"
-cl 2>&1 | findstr /C:"Version"
-cmake -S "$SourceDir" -B "$BuildDir" -G Ninja $($CMakeArgs -join ' ') || exit /b 1
-cmake --build "$BuildDir" || exit /b 1
-cmake --install "$BuildDir" --prefix "$InstallDir" || exit /b 1
-"@
+function Invoke-Msvc([string]$Name, [string[]]$Commands)
+{
+	$Script = Join-Path $WorkDir $Name
+	Set-Content -Path $Script -Encoding ASCII -Value (@(
+		'@echo off',
+		# vcvarsall runs vswhere, which isn't on every PATH
+		'set "PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%"',
+		"call `"$VcVars`" x64 $WindowsSdkVersion -vcvars_ver=$MsvcVersion || exit /b 1",
+		"set `"PATH=$GitDir;%PATH%`""
+	) + $Commands)
+	& cmd.exe /c $Script
+	if ($LASTEXITCODE -ne 0) { throw "$Name failed ($LASTEXITCODE)" }
+}
 
-& cmd.exe /c $BuildScript
-if ($LASTEXITCODE -ne 0) { throw "Dawn build failed ($LASTEXITCODE)" }
+# Configure (this also fetches the dependencies)
+Invoke-Msvc 'configure-dawn.cmd' @(
+	'cl 2>&1 | findstr /C:"Version"',
+	"cmake -S `"$SourceDir`" -B `"$BuildDir`" -G Ninja $($CMakeArgs -join ' ') || exit /b 1"
+)
+
+# Dawn and V8 (UnrealJs) both carry Abseil configured without an inline namespace, so a monolithic game
+# that links both plugins gets duplicate absl:: symbols. Dawn's copy gets its own: absl::dawn::...
+$AbslOptions = Join-Path $SourceDir 'third_party\abseil-cpp\absl\base\options.h'
+$Options = [IO.File]::ReadAllText($AbslOptions)
+$Namespaced = $Options.Replace('#define ABSL_OPTION_USE_INLINE_NAMESPACE 0', '#define ABSL_OPTION_USE_INLINE_NAMESPACE 1').Replace('#define ABSL_OPTION_INLINE_NAMESPACE_NAME head', '#define ABSL_OPTION_INLINE_NAMESPACE_NAME dawn')
+if (-not $Namespaced.Contains('#define ABSL_OPTION_INLINE_NAMESPACE_NAME dawn')) { throw "Unexpected ${AbslOptions}: can't give Abseil an inline namespace" }
+if ($Namespaced -ne $Options) { [IO.File]::WriteAllText($AbslOptions, $Namespaced) }
+
+Invoke-Msvc 'build-dawn.cmd' @(
+	"cmake --build `"$BuildDir`" || exit /b 1",
+	"cmake --install `"$BuildDir`" --prefix `"$InstallDir`" || exit /b 1"
+)
 
 # Stage into ThirdParty/Dawn: headers, the static lib, DXC runtime DLLs, licenses
 if (Test-Path $DawnDir) { Remove-Item $DawnDir -Recurse -Force }

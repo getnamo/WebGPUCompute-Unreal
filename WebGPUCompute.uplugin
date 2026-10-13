@@ -19,6 +19,18 @@
 			"Name": "WebGPUCompute",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "WebGPUComputeJs",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "UnrealJS",
+			"Enabled": true,
+			"Optional": true
 		}
 	]
 }

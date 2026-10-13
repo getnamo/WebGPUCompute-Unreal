@@ -107,6 +107,10 @@ TSharedPtr<FWebGPUContext> FWebGPUTexture::GetContext() const
 
 FWebGPUTexture::~FWebGPUTexture()
 {
+	if (TSharedPtr<FWebGPUContext> Owner = Context.Pin())
+	{
+		Owner->CountTexture(*this, false);
+	}
 	if (!Handle && !View && !Shared)
 	{
 		return;
@@ -148,6 +152,7 @@ TSharedRef<FWebGPUTexture> FWebGPUContext::CreateTexture(uint32 Width, uint32 He
 	Texture->Format = Format;
 	Texture->Usage = Usage;
 	Texture->Label = Label.IsEmpty() ? TEXT("WebGPUTexture") : Label;
+	CountTexture(*Texture, true);
 
 	Enqueue([this, Texture]()
 	{
@@ -177,6 +182,7 @@ TSharedPtr<FWebGPUTexture> FWebGPUContext::ImportTexture(FRHITexture* RHITexture
 	Texture->Usage = Usage;
 	Texture->Label = Label.IsEmpty() ? TEXT("WebGPUSharedTexture") : Label;
 	Texture->Shared = State;
+	CountTexture(*Texture, true);
 
 	Enqueue([this, Texture]()
 	{

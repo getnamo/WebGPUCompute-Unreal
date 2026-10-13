@@ -55,6 +55,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "WebGPU|Bindings")
 	UWebGPUBuffer* GetBuffer(const FString& Name) const;
 
+	/** Frees the buffers Create Buffer made and drops every binding now, instead of at garbage collection. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Bindings")
+	void Release();
+
 	void Initialize(const TSharedRef<FWebGPUBindingSet>& InNative) { Native = InNative; }
 	const TSharedPtr<FWebGPUBindingSet>& GetNative() const { return Native; }
 

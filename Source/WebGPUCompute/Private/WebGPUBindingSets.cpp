@@ -189,6 +189,7 @@ FWebGPUBindingSet::FUniformBlock* FWebGPUContext::GetUniformBlock(FWebGPUKernel&
 		Buffer->Size = FMath::Max<uint64>(Needed, 16);
 		Buffer->Usage = EWebGPUBufferUsage::Uniform;
 		Buffer->Label = FString::Printf(TEXT("%s %s"), *Set.Label, *Info.Name);
+		CountBuffer(*Buffer, true);
 		LiveBuffers.Add(Buffer);
 		CreateBufferHandle(*Buffer);
 		Block.Binding = FWebGPUResourceBinding();

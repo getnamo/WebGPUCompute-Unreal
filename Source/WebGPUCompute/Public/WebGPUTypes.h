@@ -111,4 +111,17 @@ struct FWebGPUStats
 	/** Increments every time the device is recreated after a loss. Starts at 1. */
 	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
 	int32 DeviceGeneration = 0;
+
+	/** Buffers, their bytes, kernels and textures alive right now (not cumulative): what a leak or a missed release shows up in. */
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
+	int64 LiveBuffers = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
+	int64 LiveBufferBytes = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
+	int64 LiveKernels = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
+	int64 LiveTextures = 0;
 };

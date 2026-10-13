@@ -53,6 +53,8 @@ private:
 	EWebGPUBufferUsage Usage = EWebGPUBufferUsage::Storage;
 	FString Label;
 	TSharedPtr<const FWebGPUStructLayout> ElementLayout;
+	/** Counted in the context's live stats. */
+	bool bCounted = false;
 
 	// Worker thread only
 	WGPUBuffer Handle = nullptr;
@@ -101,6 +103,8 @@ private:
 	EWebGPUTextureUsage Usage = EWebGPUTextureUsage::Storage | EWebGPUTextureUsage::Sampled;
 	FString Label;
 	TSharedPtr<FWebGPUSharedTextureState> Shared;
+	/** Counted in the context's live stats. */
+	bool bCounted = false;
 
 	// Worker thread only
 	WGPUTexture Handle = nullptr;
@@ -219,6 +223,8 @@ private:
 	FString Label;
 	FString EntryPoint;
 	FString SourceFile;
+	/** Counted in the context's live stats. */
+	bool bCounted = false;
 	FString Preamble;
 	int32 PreambleLines = 0;
 	std::atomic<bool> bReady = false;
@@ -653,4 +659,14 @@ private:
 	std::atomic<int64> StatBytesWritten = 0;
 	std::atomic<int64> StatBytesRead = 0;
 	std::atomic<int64> StatReadbacks = 0;
+	std::atomic<int64> StatLiveBuffers = 0;
+	std::atomic<int64> StatLiveBufferBytes = 0;
+	std::atomic<int64> StatLiveKernels = 0;
+	std::atomic<int64> StatLiveTextures = 0;
+
+public:
+	/** Live-object bookkeeping, for the objects' constructors and destructors. */
+	void CountBuffer(FWebGPUBuffer& Buffer, bool bAlive);
+	void CountKernel(FWebGPUKernel& Kernel, bool bAlive);
+	void CountTexture(FWebGPUTexture& Texture, bool bAlive);
 };

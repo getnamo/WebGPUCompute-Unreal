@@ -25,19 +25,32 @@ bool UWebGPUReadbackStream::CaptureTexture(UWebGPUTexture* Texture)
 	return Native->CaptureTexture(Texture->GetNative().ToSharedRef());
 }
 
-bool UWebGPUReadbackStream::ReadFrame(TFunctionRef<void(const FWebGPUReadbackFrame& Frame)> Reader)
+bool UWebGPUReadbackStream::AcquireFrame(FWebGPUReadbackFrame& OutFrame)
 {
-	FWebGPUReadbackFrame Frame;
-	if (!Native || !Native->Acquire(Frame))
+	if (!Native || !Native->Acquire(OutFrame))
 	{
 		return false;
 	}
 
-	LastFrame.Sequence = (int64)Frame.GetSequence();
-	LastFrame.CaptureFrame = (int64)Frame.GetCaptureFrame();
-	LastFrame.FramesLate = (int32)(GFrameCounter - Frame.GetCaptureFrame());
-	LastFrame.RoundTripMs = (float)((Frame.GetReadyTime() - Frame.GetCaptureTime()) * 1000.0);
-	LastFrame.Bytes = (int64)Frame.GetSize();
+	LastFrame.Sequence = (int64)OutFrame.GetSequence();
+	LastFrame.CaptureFrame = (int64)OutFrame.GetCaptureFrame();
+	LastFrame.FramesLate = (int32)(GFrameCounter - OutFrame.GetCaptureFrame());
+	LastFrame.RoundTripMs = (float)((OutFrame.GetReadyTime() - OutFrame.GetCaptureTime()) * 1000.0);
+	LastFrame.Bytes = (int64)OutFrame.GetSize();
+	LastFrame.Width = (int32)OutFrame.GetWidth();
+	LastFrame.Height = (int32)OutFrame.GetHeight();
+	LastFrame.RowBytes = (int32)OutFrame.GetRowBytes();
+	LastFrame.RowPitch = (int32)OutFrame.GetRowPitch();
+	return true;
+}
+
+bool UWebGPUReadbackStream::ReadFrame(TFunctionRef<void(const FWebGPUReadbackFrame& Frame)> Reader)
+{
+	FWebGPUReadbackFrame Frame;
+	if (!AcquireFrame(Frame))
+	{
+		return false;
+	}
 	Reader(Frame);
 	return true;
 }

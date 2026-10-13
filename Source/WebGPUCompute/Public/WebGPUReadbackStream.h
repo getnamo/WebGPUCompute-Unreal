@@ -34,6 +34,19 @@ struct WEBGPUCOMPUTE_API FWebGPUFrameInfo
 
 	UPROPERTY(BlueprintReadOnly, Category = "WebGPU|Stream")
 	int64 Bytes = 0;
+
+	/** Texture captures: size, bytes per row of pixels, and bytes between rows in the frame's memory (256-byte aligned). 0 for buffers. */
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU|Stream")
+	int32 Width = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU|Stream")
+	int32 Height = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU|Stream")
+	int32 RowBytes = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU|Stream")
+	int32 RowPitch = 0;
 };
 
 /**
@@ -87,6 +100,9 @@ public:
 
 	/** Reads the next frame in place, without copying; the frame is released when Reader returns. */
 	bool ReadFrame(TFunctionRef<void(const FWebGPUReadbackFrame& Frame)> Reader);
+
+	/** Takes the next frame to hold (its slot stays in use until the frame is released or destroyed). Updates GetLastFrameInfo. */
+	bool AcquireFrame(FWebGPUReadbackFrame& OutFrame);
 
 	/** ReadStructs for C++ callers holding an array property. */
 	bool GenericReadStructs(const FArrayProperty* ArrayProperty, void* ArrayAddress);

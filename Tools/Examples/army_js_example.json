@@ -1,0 +1,639 @@
+{
+  "_about": "Generates the JavaScript-driven army example (/WebGPUCompute/Examples/Army/ArmyExampleJs, needs UnrealJs) with BlueprintOracle; run army_example.json first (the render targets and shaders). UnrealEditor-Cmd.exe <Project>.uproject -run=BlueprintOracle -migrate -spec=<this file> [-commit] -unattended -nullrhi -nopause. The obstacle layout, camera and lights are the same as in army_example.json.",
+  "assets": [
+    {
+      "package": "/WebGPUCompute/Examples/Army/BP_WebGPUArmyJs",
+      "create": {
+        "type": "blueprint",
+        "parent": "/Script/Engine.Actor"
+      },
+      "ops": [
+        {
+          "op": "addComponent",
+          "name": "Root",
+          "class": "/Script/Engine.SceneComponent"
+        },
+        {
+          "op": "addComponent",
+          "name": "ArmyFloor",
+          "class": "/Script/Engine.StaticMeshComponent",
+          "parent": "Root",
+          "properties": {
+            "StaticMesh": "/Engine/BasicShapes/Plane.Plane",
+            "RelativeRotation": "(Pitch=0,Yaw=90,Roll=0)",
+            "RelativeScale3D": "(X=100,Y=100,Z=1)",
+            "CastShadow": false,
+            "OverrideMaterials": "(\"/Engine/EngineMaterials/Widget3DPassThrough_Opaque.Widget3DPassThrough_Opaque\")"
+          }
+        },
+        {
+          "op": "addComponent",
+          "name": "ObstacleCapture",
+          "class": "/Script/Engine.SceneCaptureComponent2D",
+          "parent": "Root",
+          "properties": {
+            "RelativeLocation": "(X=0,Y=0,Z=2000)",
+            "RelativeRotation": "(Pitch=-90,Yaw=0,Roll=0)",
+            "ProjectionType": "Orthographic",
+            "OrthoWidth": 10000,
+            "CaptureSource": "SCS_SceneDepth",
+            "TextureTarget": "/WebGPUCompute/Examples/Army/RT_ArmyObstacles.RT_ArmyObstacles",
+            "bCaptureEveryFrame": true,
+            "bCaptureOnMovement": false
+          }
+        },
+        {
+          "op": "addComponent",
+          "name": "TitleText",
+          "class": "/Script/Engine.TextRenderComponent",
+          "parent": "Root",
+          "properties": {
+            "Text": "INVTEXT(\"starting the script...\")",
+            "WorldSize": 240,
+            "HorizontalAlignment": "EHTA_Center",
+            "VerticalAlignment": "EVRTA_TextBottom",
+            "TextRenderColor": "(R=255,G=196,B=120,A=255)",
+            "RelativeLocation": "(X=5300,Y=0,Z=1600)",
+            "RelativeRotation": "(Pitch=0,Yaw=180,Roll=0)",
+            "TextMaterial": "/Engine/EngineMaterials/UnlitText.UnlitText",
+            "CastShadow": false
+          }
+        },
+        {
+          "op": "addComponent",
+          "name": "HelpText",
+          "class": "/Script/Engine.TextRenderComponent",
+          "parent": "Root",
+          "properties": {
+            "Text": "INVTEXT(\"Edit Content/Scripts/examples/webgpu/army.js or Content/Examples/Army/army_behavior.wgsl and save.   [R] respawn.   Move the blocks: the army reroutes.\")",
+            "WorldSize": 140,
+            "HorizontalAlignment": "EHTA_Center",
+            "VerticalAlignment": "EVRTA_TextTop",
+            "TextRenderColor": "(R=200,G=210,B=220,A=255)",
+            "RelativeLocation": "(X=5300,Y=0,Z=1520)",
+            "RelativeRotation": "(Pitch=0,Yaw=180,Roll=0)",
+            "TextMaterial": "/Engine/EngineMaterials/UnlitText.UnlitText",
+            "CastShadow": false
+          }
+        },
+        {
+          "op": "addComponent",
+          "name": "StatsText",
+          "class": "/Script/Engine.TextRenderComponent",
+          "parent": "Root",
+          "properties": {
+            "Text": "INVTEXT(\"waiting for the GPU...\")",
+            "WorldSize": 150,
+            "HorizontalAlignment": "EHTA_Center",
+            "VerticalAlignment": "EVRTA_TextTop",
+            "TextRenderColor": "(R=150,G=255,B=170,A=255)",
+            "RelativeLocation": "(X=5300,Y=0,Z=1300)",
+            "RelativeRotation": "(Pitch=0,Yaw=180,Roll=0)",
+            "TextMaterial": "/Engine/EngineMaterials/UnlitText.UnlitText",
+            "CastShadow": false
+          }
+        },
+        {
+          "op": "addComponent",
+          "name": "JavascriptInstance",
+          "class": "/Script/V8.JavascriptInstanceComponent",
+          "properties": {
+            "DefaultScript": "examples/webgpu/army.js",
+            "bCreateInspectorOnInstanceStartup": false,
+            "InstanceOptions": "(bEnabled=True,IsolateDomain=\"default\",ThreadOption=TaskGraphMainThread,Features=(FeatureMap=((\"UnrealClasses\",\"default\"),(\"UnrealMemory\",\"default\"),(\"UnrealGlobals\",\"default\"),(\"UnrealMisc\",\"default\"),(\"Context\",\"default\"),(\"JsOwner\",\"default\"))),bUseUniqueIsolate=False,bUseUniqueContext=True,bAttachToTick=True)"
+          }
+        },
+        {
+          "op": "addComponent",
+          "name": "FileWatcher",
+          "class": "/Script/V8.JavascriptFileWatcherComponent",
+          "properties": {
+            "Extensions": "(\"js\")",
+            "DebounceSeconds": 0.25
+          }
+        },
+        {
+          "op": "addVar",
+          "name": "DisplayTarget",
+          "category": "object",
+          "class": "/Script/Engine.TextureRenderTarget2D"
+        },
+        {
+          "op": "addVar",
+          "name": "ReloadCount",
+          "category": "int"
+        },
+        {
+          "op": "setDefaults",
+          "properties": {
+            "AutoReceiveInput": "Player0",
+            "DisplayTarget": "/WebGPUCompute/Examples/Army/RT_ArmyDisplay.RT_ArmyDisplay"
+          }
+        },
+        {
+          "op": "compile"
+        },
+        {
+          "op": "buildBody",
+          "graph": "EventGraph",
+          "nodes": [
+            {
+              "id": "c_reload",
+              "kind": "comment",
+              "pos": [
+                -40,
+                -100
+              ],
+              "size": [
+                1560,
+                400
+              ],
+              "text": "A script was saved: count it and run the script again (army.js releases its GPU resources in OnEndPlay first). Saved .wgsl files reload by themselves."
+            },
+            {
+              "id": "changed",
+              "kind": "componentEvent",
+              "component": "FileWatcher",
+              "delegate": "OnFilesChanged",
+              "pos": [
+                0,
+                0
+              ]
+            },
+            {
+              "id": "count",
+              "kind": "variableGet",
+              "var": "ReloadCount",
+              "pos": [
+                260,
+                140
+              ]
+            },
+            {
+              "id": "add",
+              "kind": "callFunction",
+              "class": "/Script/Engine.KismetMathLibrary",
+              "member": "Add_IntInt",
+              "pos": [
+                440,
+                140
+              ],
+              "defaults": [
+                {
+                  "pin": "B",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "set",
+              "kind": "variableSet",
+              "var": "ReloadCount",
+              "pos": [
+                660,
+                0
+              ]
+            },
+            {
+              "id": "js",
+              "kind": "variableGet",
+              "var": "JavascriptInstance",
+              "pos": [
+                840,
+                140
+              ]
+            },
+            {
+              "id": "reload",
+              "kind": "callFunction",
+              "class": "/Script/V8.JavascriptInstanceComponent",
+              "member": "Reload",
+              "pos": [
+                1020,
+                0
+              ]
+            },
+            {
+              "id": "print",
+              "kind": "callFunction",
+              "class": "/Script/Engine.KismetSystemLibrary",
+              "member": "PrintString",
+              "pos": [
+                1240,
+                0
+              ],
+              "defaults": [
+                {
+                  "pin": "InString",
+                  "value": "army.js saved: the script runs again"
+                },
+                {
+                  "pin": "Duration",
+                  "value": "3.0"
+                }
+              ]
+            },
+            {
+              "id": "c_keys",
+              "kind": "comment",
+              "pos": [
+                -40,
+                340
+              ],
+              "size": [
+                900,
+                300
+              ],
+              "text": "R: tell the script to respawn the army"
+            },
+            {
+              "id": "key_r",
+              "kind": "inputKey",
+              "key": "R",
+              "pos": [
+                0,
+                420
+              ]
+            },
+            {
+              "id": "js_r",
+              "kind": "variableGet",
+              "var": "JavascriptInstance",
+              "pos": [
+                240,
+                560
+              ]
+            },
+            {
+              "id": "emit",
+              "kind": "callFunction",
+              "class": "/Script/V8.JavascriptInstanceComponent",
+              "member": "Emit",
+              "pos": [
+                480,
+                420
+              ],
+              "defaults": [
+                {
+                  "pin": "Name",
+                  "value": "key"
+                },
+                {
+                  "pin": "Message",
+                  "value": "R"
+                }
+              ]
+            }
+          ],
+          "links": [
+            {
+              "from": "changed:then",
+              "to": "set:execute"
+            },
+            {
+              "from": "count:ReloadCount",
+              "to": "add:A"
+            },
+            {
+              "from": "add:ReturnValue",
+              "to": "set:ReloadCount"
+            },
+            {
+              "from": "set:then",
+              "to": "reload:execute"
+            },
+            {
+              "from": "js:JavascriptInstance",
+              "to": "reload:self"
+            },
+            {
+              "from": "reload:then",
+              "to": "print:execute"
+            },
+            {
+              "from": "key_r:Pressed",
+              "to": "emit:execute"
+            },
+            {
+              "from": "js_r:JavascriptInstance",
+              "to": "emit:self"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "package": "/WebGPUCompute/Examples/Army/ArmyExampleJs",
+      "create": {
+        "type": "level",
+        "worldSettings": {
+          "DefaultGameMode": "/Script/Engine.GameModeBase"
+        },
+        "actors": [
+          {
+            "class": "/WebGPUCompute/Examples/Army/BP_WebGPUArmyJs.BP_WebGPUArmyJs_C",
+            "label": "ArmyJs",
+            "location": [
+              0,
+              0,
+              0
+            ]
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Wall_Near",
+            "location": [
+              -3400,
+              0,
+              150
+            ],
+            "scale": [
+              32,
+              2,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Wall_Center",
+            "location": [
+              500,
+              0,
+              150
+            ],
+            "scale": [
+              28,
+              2,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Wall_Far",
+            "location": [
+              3900,
+              0,
+              150
+            ],
+            "scale": [
+              22,
+              2,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Wall_Diagonal",
+            "location": [
+              -2300,
+              2300,
+              150
+            ],
+            "rotation": [
+              0,
+              45,
+              0
+            ],
+            "scale": [
+              20,
+              2,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Cup_Back",
+            "location": [
+              2200,
+              -2300,
+              150
+            ],
+            "scale": [
+              14,
+              2,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Cup_Left",
+            "location": [
+              1400,
+              -2900,
+              150
+            ],
+            "scale": [
+              2,
+              12,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Cup_Right",
+            "location": [
+              3000,
+              -2900,
+              150
+            ],
+            "scale": [
+              2,
+              12,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cube.Cube",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Pillar_1",
+            "location": [
+              -2600,
+              -2600,
+              150
+            ],
+            "scale": [
+              5,
+              5,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cylinder.Cylinder",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Pillar_2",
+            "location": [
+              -600,
+              -3400,
+              150
+            ],
+            "scale": [
+              6,
+              6,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cylinder.Cylinder",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Pillar_3",
+            "location": [
+              3300,
+              2600,
+              150
+            ],
+            "scale": [
+              6,
+              6,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cylinder.Cylinder",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Pillar_4",
+            "location": [
+              900,
+              3200,
+              150
+            ],
+            "scale": [
+              5,
+              5,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cylinder.Cylinder",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.StaticMeshActor",
+            "label": "Pillar_5",
+            "location": [
+              -1200,
+              1700,
+              150
+            ],
+            "scale": [
+              4,
+              4,
+              3
+            ],
+            "properties": {
+              "StaticMeshComponent.StaticMesh": "/Engine/BasicShapes/Cylinder.Cylinder",
+              "StaticMeshComponent.Mobility": "Movable"
+            }
+          },
+          {
+            "class": "/Script/Engine.CameraActor",
+            "label": "ExampleCamera",
+            "location": [
+              -10000,
+              0,
+              7500
+            ],
+            "rotation": [
+              -36,
+              0,
+              0
+            ],
+            "properties": {
+              "AutoActivateForPlayer": "Player0",
+              "CameraComponent.FieldOfView": 70
+            }
+          },
+          {
+            "class": "/Script/Engine.PostProcessVolume",
+            "label": "FixedExposure",
+            "properties": {
+              "bUnbound": true,
+              "Settings": "(bOverride_AutoExposureMethod=True,AutoExposureMethod=AEM_Manual,bOverride_AutoExposureApplyPhysicalCameraExposure=True,AutoExposureApplyPhysicalCameraExposure=False,bOverride_AutoExposureBias=True,AutoExposureBias=0.0)"
+            }
+          },
+          {
+            "class": "/Script/Engine.DirectionalLight",
+            "label": "Light",
+            "location": [
+              0,
+              0,
+              3000
+            ],
+            "rotation": [
+              -50,
+              35,
+              0
+            ],
+            "properties": {
+              "LightComponent.Mobility": "Movable",
+              "LightComponent.Intensity": 6
+            }
+          },
+          {
+            "class": "/Script/Engine.DirectionalLight",
+            "label": "FillLight",
+            "location": [
+              0,
+              0,
+              3200
+            ],
+            "rotation": [
+              -30,
+              -150,
+              0
+            ],
+            "properties": {
+              "LightComponent.Mobility": "Movable",
+              "LightComponent.Intensity": 1.5,
+              "LightComponent.CastShadows": false
+            }
+          },
+          {
+            "class": "/Script/Engine.PlayerStart",
+            "label": "PlayerStart",
+            "location": [
+              -9000,
+              0,
+              100
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

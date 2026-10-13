@@ -12,7 +12,7 @@ Dawn is not checked in. Build the pinned version from source before building the
 powershell -ExecutionPolicy Bypass -File Tools/BuildDawn.ps1
 ```
 
-This needs Visual Studio with the MSVC 14.44 toolset (the oldest UE 5.8 accepts, so the static lib links under either 14.44 or 14.50), Git for Windows and Python 3. It clones Dawn, fetches its dependencies, builds it with the D3D12 backend and DXC, and installs headers, `webgpu_dawn.lib` and `dxcompiler.dll` into `ThirdParty/Dawn`. The source and build trees go to `ThirdParty/.dawn-build` (several GB); pass `-WorkDir` to put them elsewhere.
+This needs Visual Studio with the MSVC 14.44 toolset (the oldest UE 5.8 accepts, so the static lib links under either 14.44 or 14.50), Git for Windows and Python 3. It clones Dawn, fetches its dependencies, builds it with the D3D12 backend and DXC, and installs headers, `webgpu_dawn.lib` and `dxcompiler.dll` into `ThirdParty/Dawn`. The source and build trees go to `ThirdParty/.dawn-build` (several GB); pass `-WorkDir` to put them elsewhere. Dawn's bundled Abseil is built in its own inline namespace (`absl::dawn`), so a game can link Dawn together with other libraries that carry Abseil, such as UnrealJs's V8.
 
 ## Usage
 
@@ -141,6 +141,36 @@ The set also writes uniforms by member name: **Set Float** `"params.dt"` writes 
 Obstacles are whatever stands on the floor: a scene capture renders depth from above into a shared render target that the kernels read, so moving a block (also while playing) reroutes the army. Press **R** to respawn.
 
 The Blueprint, map and render targets are generated from `Tools/Examples/army_example.json` with [BlueprintOracle](https://github.com/getnamo/BlueprintOracle-Unreal) (`-run=BlueprintOracle -migrate -spec=... -commit`).
+
+### JavaScript (UnrealJs)
+
+With [UnrealJs](https://github.com/getnamo/UnrealJs) 2.7+ in the project, scripts drive WebGPU through `require('webgpu')` (`Content/Scripts/webgpu.js`). The `WebGPUComputeJs` module adds what scripts need on top of the Blueprint API; without UnrealJs it builds empty.
+
+```js
+const gpu = require('webgpu');
+const scope = gpu.scope('demo');                     // owns what it makes
+const bindings = scope.bindings();
+const values = bindings.buffer('values', 1024, 4);   // bound as `values` in every kernel made with these bindings
+const kernel = scope.kernel({ file: '/Game/Shaders/demo.wgsl', entry: 'main', bindings });   // or { source }
+await kernel.ready;
+gpu.write(values, new Float32Array(1024).fill(1));    // from script memory, one copy
+bindings.set('params.scale', 2);
+kernel.dispatch(1024);
+const result = new Float32Array(await gpu.read(values));
+
+const stream = scope.stream(values);                 // per frame: capture after dispatching...
+stream.capture();
+stream.latest((bytes, info) => new Float32Array(bytes)[0]);   // ...and read an earlier frame in place, no copy
+Context.OnEndPlay = () => scope.release();           // free it all on reload / EndPlay
+```
+
+- `stream.latest` hands the script the mapped GPU readback itself. The ArrayBuffer is detached when the callback returns (or when a frame from `stream.acquire()` is released), so a kept reference reads as empty instead of freed memory.
+- `kernel.ready` resolves at the first successful compile. `.wgsl` files hot reload as in Blueprint; `kernel.onCompiled(fn)` sees every compile.
+- `gpu.access([textures], fn)` runs dispatches between Begin and End Access of shared render targets.
+- Typed arrays also work with the Blueprint functions directly (`buffer.WriteFloats(new Float32Array(...))`).
+- A scope releases its kernels, bindings, buffers, textures and streams together. Do it when the script reloads: `Context.OnEndPlay` in a `JavascriptInstanceComponent`, or the cleanup function a `devrequire` main returns. `GetWebGPUStats()` reports live buffers, bytes, kernels and textures, to check that nothing piles up.
+
+**Example:** map **ArmyExampleJs** runs the same army from `Content/Scripts/examples/webgpu/army.js`. The script owns the resources, dispatches every frame, and reads per-team numbers back from the GPU (`army_stats.wgsl`) to show them. Save the script and it runs again (a file watcher calls the instance component's `Reload()`); its scope frees the old run's GPU objects first. Save a `.wgsl` file and only the kernels reload. The Blueprint and map come from `Tools/Examples/army_js_example.json`.
 
 See https://github.com/getnamo/WebGPUCompute-Unreal/issues/1 for tracking on initial usable build.
 
