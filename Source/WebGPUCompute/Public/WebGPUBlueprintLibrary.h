@@ -5,12 +5,15 @@
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "Kismet/BlueprintAsyncActionBase.h"
+#include "WebGPUStreams.h"
 #include "WebGPUStructLayout.h"
 #include "WebGPUTypes.h"
 #include "WebGPUBlueprintLibrary.generated.h"
 
 class UWebGPUBuffer;
 class UWebGPUKernel;
+class UWebGPUReadbackStream;
+class UWebGPUStructMirror;
 
 UCLASS()
 class WEBGPUCOMPUTE_API UWebGPUBlueprintLibrary : public UBlueprintFunctionLibrary
@@ -65,6 +68,20 @@ public:
 	UFUNCTION(BlueprintCallable, CustomThunk, Category = "WebGPU|Structs", meta = (ArrayParm = "OutItems"))
 	static bool WebGPUBytesToStructArray(const TArray<uint8>& Bytes, TArray<int32>& OutItems);
 	DECLARE_FUNCTION(execWebGPUBytesToStructArray);
+
+	/** Per-frame results from the GPU: a ring of Slots readback slots of SlotBytes each (see EWebGPUStreamPolicy). */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Stream")
+	static UWebGPUReadbackStream* CreateWebGPUReadbackStream(int64 SlotBytes, int32 Slots = 3, EWebGPUStreamPolicy Policy = EWebGPUStreamPolicy::Latest, const FString& Label = TEXT(""));
+
+	/** A readback stream whose slots hold all of Buffer. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Stream")
+	static UWebGPUReadbackStream* CreateWebGPUReadbackStreamForBuffer(UWebGPUBuffer* Buffer, int32 Slots = 3, EWebGPUStreamPolicy Policy = EWebGPUStreamPolicy::Latest, const FString& Label = TEXT(""));
+
+	/** A struct array kept on the GPU and the CPU: set elements, then Sync uploads only what changed. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Mirror")
+	static UWebGPUStructMirror* CreateWebGPUStructMirror(UScriptStruct* StructType, int32 Count,
+		UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/WebGPUCompute.EWebGPUBufferUsage")) int32 Usage = 1,
+		const FString& Label = TEXT(""));
 
 	/** Implementations of the wildcard nodes, for C++ callers holding an array property. */
 	static bool GenericWriteStructArray(UWebGPUBuffer* Buffer, const FArrayProperty* ArrayProperty, const void* ArrayAddress, int32 FirstElement);

@@ -54,6 +54,35 @@ Context->ReadStructArray<FAgentState>(Agents.ToSharedRef(), 0, Count, [](bool bS
 
 Blueprint has the same through **Create WebGPU Struct Buffer**, **Create WebGPU Kernel With Structs**, **Write WebGPU Struct Array** and **WebGPU Bytes To Struct Array** (wildcard struct arrays), **Get WGSL For Struct**, and the kernel's **Get Bindings** / **Get Workgroup Size**. If a struct buffer's UStruct and the shader's struct disagree, a warning lists the differing fields.
 
+### Streams
+
+Writes and reads join the command buffer of the dispatches around them, so write → dispatch → write → dispatch → read is a single submit. For work that repeats every frame, `WebGPUStreams.h` adds three pieces:
+
+- **Readback streams** (`CreateReadbackStream`): a ring of readback slots. `Capture` copies a buffer range after the dispatches before it; the consumer `Acquire`s a frame and reads the mapped memory in place until it releases it. Policies, as in PythonCLI:
+  - **Latest**: the newest frame; stale ones are skipped, and nothing waits.
+  - **Queue**: every frame in order; a capture with no free slot is dropped and counted.
+  - **Lockstep**: `Capture` blocks until the data is back, for same-tick results.
+- **Upload streams** (`CreateUploadStream`): slots that stay mapped for writing. Pack data straight into one and `Commit` it to a buffer; when no slot is free, the write takes the copying path instead of being dropped.
+- **Struct mirrors** (`TWebGPUStructMirror<T>`): a struct array kept on the CPU and the GPU. Edit elements and `Sync` uploads only what changed. Nearby edits merge into a few copies; widely scattered edits upload just the changed elements and their indices, and a small kernel scatters them into place. After a device loss, the next Sync re-uploads everything. Mirrors are for data the CPU owns (grids, goals, parameters); keep state that kernels write in its own buffer.
+
+```cpp
+TWebGPUStructMirror<FAgentGoal> Goals = TWebGPUStructMirror<FAgentGoal>::Create(Context.ToSharedRef(), Count);
+TSharedRef<FWebGPUReadbackStream> Results = Context->CreateReadbackStream(Count * sizeof(uint32), 3, EWebGPUStreamPolicy::Latest);
+
+// Every tick
+Goals.Edit(Index).Target = NewTarget;        // marks the element dirty
+Goals.Sync();                                // uploads only the changed goals
+Context->DispatchForCount(Step, Count);
+Results->Capture(Cells);
+FWebGPUReadbackFrame Frame;
+if (Results->Acquire(Frame))                 // usually the previous tick's result
+{
+	for (uint32 Cell : Frame.View<uint32>()) { /* ... */ }
+}
+```
+
+Blueprint: **Create WebGPU Readback Stream (For Buffer)**, **Capture**, **Read Bytes / Floats / Ints / Structs** (wildcard array), **Get Last Frame Info**; **Create WebGPU Struct Mirror**, **Set Element / Get Element** (wildcard struct), **Set Elements**, **Sync**, **Get Buffer**.
+
 See https://github.com/getnamo/WebGPUCompute-Unreal/issues/1 for tracking on initial usable build.
 
 [Discord Server](https://discord.gg/qfJUyxaW4s)

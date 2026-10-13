@@ -5,6 +5,8 @@
 #include "WebGPUCompute.h"
 #include "WebGPUContext.h"
 #include "WebGPUKernel.h"
+#include "WebGPUReadbackStream.h"
+#include "WebGPUStructMirror.h"
 #include "WebGPUSubsystem.h"
 
 UWebGPUBuffer* UWebGPUBlueprintLibrary::CreateWebGPUBuffer(int64 Size, int32 Usage, const FString& Label)
@@ -93,6 +95,48 @@ UWebGPUBuffer* UWebGPUBlueprintLibrary::CreateWebGPUStructBuffer(UScriptStruct* 
 	UWebGPUBuffer* Buffer = NewObject<UWebGPUBuffer>();
 	Buffer->Initialize(Native.ToSharedRef());
 	return Buffer;
+}
+
+UWebGPUReadbackStream* UWebGPUBlueprintLibrary::CreateWebGPUReadbackStream(int64 SlotBytes, int32 Slots, EWebGPUStreamPolicy Policy, const FString& Label)
+{
+	TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
+	if (!Context || SlotBytes <= 0)
+	{
+		return nullptr;
+	}
+	UWebGPUReadbackStream* Stream = NewObject<UWebGPUReadbackStream>();
+	Stream->Initialize(Context->CreateReadbackStream((uint64)SlotBytes, Slots, Policy, Label));
+	return Stream;
+}
+
+UWebGPUReadbackStream* UWebGPUBlueprintLibrary::CreateWebGPUReadbackStreamForBuffer(UWebGPUBuffer* Buffer, int32 Slots, EWebGPUStreamPolicy Policy, const FString& Label)
+{
+	if (!Buffer || !Buffer->GetNative())
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("CreateWebGPUReadbackStreamForBuffer: no valid buffer"));
+		return nullptr;
+	}
+	return CreateWebGPUReadbackStream(Buffer->GetSize(), Slots, Policy, Label.IsEmpty() ? Buffer->GetNative()->GetLabel() + TEXT(" readback") : Label);
+}
+
+UWebGPUStructMirror* UWebGPUBlueprintLibrary::CreateWebGPUStructMirror(UScriptStruct* StructType, int32 Count, int32 Usage, const FString& Label)
+{
+	TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
+	if (!Context)
+	{
+		return nullptr;
+	}
+	const EWebGPUBufferUsage BufferUsage = Usage == 0 ? EWebGPUBufferUsage::Storage : (EWebGPUBufferUsage)Usage;
+	TSharedPtr<FWebGPUStructMirror> Native = FWebGPUStructMirror::Create(Context.ToSharedRef(), StructType, Count, BufferUsage, Label);
+	if (!Native)
+	{
+		return nullptr;
+	}
+	UWebGPUBuffer* Buffer = NewObject<UWebGPUBuffer>();
+	Buffer->Initialize(Native->GetBuffer());
+	UWebGPUStructMirror* Mirror = NewObject<UWebGPUStructMirror>();
+	Mirror->Initialize(Native.ToSharedRef(), Buffer);
+	return Mirror;
 }
 
 FString UWebGPUBlueprintLibrary::GetWGSLForStruct(UScriptStruct* StructType, EWebGPUAddressSpace Space)

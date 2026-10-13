@@ -2,6 +2,7 @@
 
 #include "WebGPUContext.h"
 #include "WebGPUCompute.h"
+#include "WebGPUStreams.h"
 #include "Async/Async.h"
 #include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
@@ -68,6 +69,13 @@ namespace
 	}
 	constexpr int32 MaxPooledStagingPerSize = 4;
 
+	/** Writes share upload pages of this size; bigger writes get a page of their own (pooled by size). */
+	constexpr uint64 UploadPageSize = 1 << 20;
+	constexpr int32 MaxPooledUploadPagesPerSize = 4;
+
+	/** A steady stream of commands still gets submitted in batches of at most this many. */
+	constexpr int32 MaxBatchCommands = 512;
+
 	/** Shared between a Flush caller and the worker so a timed-out wait never touches a dead event. */
 	struct FFlushSignal
 	{
@@ -83,16 +91,21 @@ namespace
 
 // Async requests, owned by their callback
 
-struct FWebGPUContext::FReadRequest
+struct FWebGPUContext::FMapRequest
 {
 	FWebGPUContext* Context = nullptr;
-	WGPUBuffer Staging = nullptr;
-	uint64 Capacity = 0;
-	uint64 Size = 0;
-	uint64 MappedSize = 0;
 	uint32 Generation = 0;
-	FWebGPUReadCallback Callback;
-	EWebGPUCallbackThread Thread = EWebGPUCallbackThread::GameThread;
+	TUniqueFunction<void(bool bSuccess)> Handler;
+};
+
+/** Upload memory for WriteBuffer: mapped for writing, unmapped for the submit that copies from it, then remapped. */
+struct FWebGPUContext::FUploadPage
+{
+	WGPUBuffer Buffer = nullptr;
+	uint64 Capacity = 0;
+	uint64 Used = 0;
+	uint8* Mapped = nullptr;
+	uint32 Generation = 0;
 };
 
 struct FWebGPUContext::FCompileRequest
@@ -110,22 +123,14 @@ struct FWebGPUContext::FCompileRequest
 struct FWebGPUContext::FBatchScopeRequest
 {
 	FWebGPUContext* Context = nullptr;
-	FString Labels;
-};
-
-struct FWebGPUContext::FTimestampRequest
-{
-	FWebGPUContext* Context = nullptr;
-	WGPUBuffer Staging = nullptr;
-	uint64 Capacity = 0;
-	uint32 Count = 0;
 	uint32 Generation = 0;
-	TArray<TWeakPtr<FWebGPUKernel>> Kernels;
+	FString Labels;
 };
 
 struct FWebGPUContext::FFlushRequest
 {
 	FWebGPUContext* Context = nullptr;
+	uint32 Generation = 0;
 	TSharedPtr<FFlushSignal> Signal;
 };
 
@@ -144,21 +149,22 @@ FWebGPUBuffer::~FWebGPUBuffer()
 	}
 
 	WGPUBuffer ToRelease = Handle;
-	auto Release = [ToRelease]()
-	{
-		// Destroy frees the memory now rather than when Dawn drops its last internal reference
-		wgpuBufferDestroy(ToRelease);
-		wgpuBufferRelease(ToRelease);
-	};
-
 	TSharedPtr<FWebGPUContext> Ctx = Context.Pin();
-	if (Ctx && !Ctx->IsInWorkerThread())
+	if (!Ctx)
 	{
-		Ctx->Enqueue(MoveTemp(Release));
+		wgpuBufferRelease(ToRelease);
+	}
+	else if (Ctx->IsInWorkerThread())
+	{
+		Ctx->DestroyBufferOnWorker(ToRelease);
 	}
 	else
 	{
-		Release();
+		FWebGPUContext* CtxPtr = Ctx.Get();
+		Ctx->Enqueue([CtxPtr, ToRelease]()
+		{
+			CtxPtr->DestroyBufferOnWorker(ToRelease);
+		});
 	}
 }
 
@@ -338,6 +344,10 @@ uint32 FWebGPUContext::Run()
 				break;
 			}
 			Command();
+			if (Encoder && ++BatchCommands >= MaxBatchCommands)
+			{
+				SubmitBatch();
+			}
 		}
 		if (bStopping)
 		{
@@ -353,6 +363,11 @@ uint32 FWebGPUContext::Run()
 		if (PendingCallbacks > 0 && WorkerDevice)
 		{
 			wgpuInstanceProcessEvents(WorkerDevice->GetInstance());
+		}
+
+		if (bHasRetiredDevices)
+		{
+			ShutdownRetiredDevices(false);
 		}
 
 		if ((bDeviceLostSignal || !WorkerDevice || WorkerDevice->IsLost()) && FPlatformTime::Seconds() >= NextRecoveryTime)
@@ -543,13 +558,7 @@ void FWebGPUContext::WriteBuffer(const TSharedRef<FWebGPUBuffer>& Buffer, uint64
 		{
 			return;
 		}
-		// Keep order with dispatches already encoded in this batch
-		if (Encoder)
-		{
-			SubmitBatch();
-		}
-		wgpuQueueWriteBuffer(WorkerDevice->GetQueue(), Buffer->Handle, Offset, Data.GetData(), (size_t)Data.Num());
-		StatBytesWritten += Data.Num();
+		UploadOnWorker(*Buffer, Offset, Data.GetData(), (uint64)Data.Num());
 	});
 }
 
@@ -733,7 +742,7 @@ bool FWebGPUContext::Flush(double TimeoutSeconds)
 		}
 		SubmitBatch();
 
-		FFlushRequest* Request = new FFlushRequest{ this, Signal };
+		FFlushRequest* Request = new FFlushRequest{ this, DeviceGeneration, Signal };
 		WGPUQueueWorkDoneCallbackInfo Info = {};
 		Info.mode = WGPUCallbackMode_AllowProcessEvents;
 		Info.callback = &FWebGPUContext::OnFlushDone;
@@ -894,7 +903,7 @@ void FWebGPUContext::OnPipelineCreated(WGPUCreatePipelineAsyncStatus Status, WGP
 {
 	TUniquePtr<FCompileRequest> Request(static_cast<FCompileRequest*>(UserData1));
 	FWebGPUContext& Self = *Request->Context;
-	Self.PendingCallbacks--;
+	Self.CallbackDone(Request->Generation);
 
 	TSharedPtr<FWebGPUKernel> Kernel = Request->Kernel.Pin();
 	if (!Kernel || Request->Generation != Self.DeviceGeneration || Self.bStopping || Self.bReleasingDevice)
@@ -1173,64 +1182,237 @@ void FWebGPUContext::ReadBufferOnWorker(FWebGPUBuffer& Buffer, uint64 Offset, ui
 		return;
 	}
 
+	// The copy joins the current batch; the staging buffer is mapped once that batch is submitted
 	uint64 Capacity = 0;
 	WGPUBuffer Staging = AcquireStaging(Size, Capacity);
 	wgpuCommandEncoderCopyBufferToBuffer(GetEncoder(), Buffer.Handle, Offset, Staging, 0, Size);
-	SubmitBatch();
-
-	FReadRequest* Request = new FReadRequest();
-	Request->Context = this;
-	Request->Staging = Staging;
-	Request->Capacity = Capacity;
-	Request->Size = Size;
-	Request->MappedSize = Size;
-	Request->Generation = DeviceGeneration;
-	Request->Callback = MoveTemp(Callback);
-	Request->Thread = CallbackThread;
-
-	WGPUBufferMapCallbackInfo Info = {};
-	Info.mode = WGPUCallbackMode_AllowProcessEvents;
-	Info.callback = &FWebGPUContext::OnReadMapped;
-	Info.userdata1 = Request;
-	PendingCallbacks++;
 	StatReadbacks++;
-	wgpuBufferMapAsync(Staging, WGPUMapMode_Read, 0, (size_t)Size, Info);
+
+	const uint32 Generation = DeviceGeneration;
+	AfterSubmit([this, Staging, Capacity, Size, Generation, Callback = MoveTemp(Callback), CallbackThread](bool bSubmitted) mutable
+	{
+		if (!bSubmitted)
+		{
+			wgpuBufferRelease(Staging);
+			Deliver(CallbackThread, [Callback = MoveTemp(Callback)]() mutable
+			{
+				if (Callback)
+				{
+					Callback(false, TArray<uint8>());
+				}
+			});
+			return;
+		}
+
+		MapAsync(Staging, WGPUMapMode_Read, 0, Size, [this, Staging, Capacity, Size, Generation, Callback = MoveTemp(Callback), CallbackThread](bool bSuccess) mutable
+		{
+			TArray<uint8> Data;
+			if (bSuccess)
+			{
+				const void* Mapped = wgpuBufferGetConstMappedRange(Staging, 0, (size_t)Size);
+				bSuccess = Mapped != nullptr;
+				if (bSuccess)
+				{
+					Data.SetNumUninitialized((int32)Size);
+					FMemory::Memcpy(Data.GetData(), Mapped, Size);
+					StatBytesRead += Size;
+				}
+				wgpuBufferUnmap(Staging);
+				ReleaseStaging(Staging, Capacity, Generation);
+			}
+			else
+			{
+				wgpuBufferRelease(Staging);
+			}
+
+			Deliver(CallbackThread, [Callback = MoveTemp(Callback), bSuccess, Data = MoveTemp(Data)]() mutable
+			{
+				if (Callback)
+				{
+					Callback(bSuccess, MoveTemp(Data));
+				}
+			});
+		});
+	});
 }
 
-void FWebGPUContext::OnReadMapped(WGPUMapAsyncStatus Status, WGPUStringView Message, void* UserData1, void*)
+void FWebGPUContext::UploadOnWorker(FWebGPUBuffer& Buffer, uint64 Offset, const void* Data, uint64 Size)
 {
-	TUniquePtr<FReadRequest> Request(static_cast<FReadRequest*>(UserData1));
-	FWebGPUContext& Self = *Request->Context;
-	Self.PendingCallbacks--;
-
-	TArray<uint8> Data;
-	bool bSuccess = Status == WGPUMapAsyncStatus_Success;
-	if (bSuccess)
+	uint64 PageOffset = 0;
+	if (FUploadPage* Page = AllocateUpload(Size, PageOffset))
 	{
-		const void* Mapped = wgpuBufferGetConstMappedRange(Request->Staging, 0, (size_t)Request->MappedSize);
-		bSuccess = Mapped != nullptr;
-		if (bSuccess)
-		{
-			Data.SetNumUninitialized((int32)Request->Size);
-			FMemory::Memcpy(Data.GetData(), Mapped, Request->Size);
-			Self.StatBytesRead += Request->Size;
-		}
-		wgpuBufferUnmap(Request->Staging);
-		Self.ReleaseStaging(Request->Staging, Request->Capacity, Request->Generation);
+		// Staged in upload memory and copied in order with the batch's dispatches (no extra submit)
+		FMemory::Memcpy(Page->Mapped + PageOffset, Data, Size);
+		wgpuCommandEncoderCopyBufferToBuffer(GetEncoder(), Page->Buffer, PageOffset, Buffer.Handle, Offset, Size);
 	}
 	else
 	{
-		UE_LOG(LogWebGPU, Verbose, TEXT("ReadBuffer map failed (%d): %s"), (int32)Status, *FWebGPUDevice::ToFString(Message));
-		wgpuBufferRelease(Request->Staging);
+		// No upload memory: Dawn stages it at the queue's current point, after what is encoded so far
+		SubmitBatch();
+		wgpuQueueWriteBuffer(WorkerDevice->GetQueue(), Buffer.Handle, Offset, Data, (size_t)Size);
+	}
+	StatBytesWritten += Size;
+}
+
+WGPUBuffer FWebGPUContext::CreateMappableBuffer(WGPUBufferUsage Usage, uint64 Size, bool bMappedAtCreation, const char* Label)
+{
+	WGPUBufferDescriptor Desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+	Desc.label = ToView(Label);
+	Desc.usage = Usage;
+	Desc.size = Size;
+	Desc.mappedAtCreation = bMappedAtCreation ? WGPU_TRUE : WGPU_FALSE;
+
+	WorkerDevice->PushErrorScopes();
+	WGPUBuffer Buffer = wgpuDeviceCreateBuffer(WorkerDevice->GetDevice(), &Desc);
+	FString Error;
+	if (!WorkerDevice->PopErrorScopes(Error))
+	{
+		UE_LOG(LogWebGPU, Error, TEXT("Creating a %llu-byte staging buffer failed: %s"), Size, *Error);
+		if (Buffer)
+		{
+			wgpuBufferRelease(Buffer);
+		}
+		return nullptr;
+	}
+	return Buffer;
+}
+
+FWebGPUContext::FUploadPage* FWebGPUContext::AllocateUpload(uint64 Size, uint64& OutOffset)
+{
+	const uint64 Aligned = Align(Size, (uint64)4);
+	if (CurrentUploadPage && CurrentUploadPage->Used + Aligned <= CurrentUploadPage->Capacity)
+	{
+		OutOffset = CurrentUploadPage->Used;
+		CurrentUploadPage->Used += Aligned;
+		return CurrentUploadPage;
 	}
 
-	Deliver(Request->Thread, [Callback = MoveTemp(Request->Callback), bSuccess, Data = MoveTemp(Data)]() mutable
+	const uint64 Capacity = FMath::Max<uint64>(UploadPageSize, FMath::RoundUpToPowerOfTwo64(Aligned));
+	FUploadPage* Page = nullptr;
+	TArray<FUploadPage*>* Free = UploadPagePool.Find(Capacity);
+	if (Free && Free->Num() > 0)
 	{
-		if (Callback)
+		Page = Free->Pop(EAllowShrinking::No);
+	}
+	else
+	{
+		WGPUBuffer Buffer = CreateMappableBuffer(WGPUBufferUsage_MapWrite | WGPUBufferUsage_CopySrc, Capacity, true, "WebGPUCompute upload");
+		if (!Buffer)
 		{
-			Callback(bSuccess, MoveTemp(Data));
+			return nullptr;
+		}
+		Page = new FUploadPage();
+		Page->Buffer = Buffer;
+		Page->Capacity = Capacity;
+		Page->Generation = DeviceGeneration;
+		Page->Mapped = static_cast<uint8*>(wgpuBufferGetMappedRange(Buffer, 0, (size_t)Capacity));
+		if (!Page->Mapped)
+		{
+			DeleteUploadPage(Page);
+			return nullptr;
+		}
+	}
+
+	Page->Used = Aligned;
+	OutOffset = 0;
+	BatchUploadPages.Add(Page);
+	// Small writes keep filling a shared page; a big write's own page only becomes current if there is none
+	if (Capacity == UploadPageSize || !CurrentUploadPage)
+	{
+		CurrentUploadPage = Page;
+	}
+	return Page;
+}
+
+void FWebGPUContext::RecycleUploadPage(FUploadPage* Page)
+{
+	MapAsync(Page->Buffer, WGPUMapMode_Write, 0, Page->Capacity, [this, Page](bool bSuccess)
+	{
+		if (!bSuccess || Page->Generation != DeviceGeneration || bStopping || bReleasingDevice)
+		{
+			DeleteUploadPage(Page);
+			return;
+		}
+		Page->Mapped = static_cast<uint8*>(wgpuBufferGetMappedRange(Page->Buffer, 0, (size_t)Page->Capacity));
+		Page->Used = 0;
+		TArray<FUploadPage*>& Free = UploadPagePool.FindOrAdd(Page->Capacity);
+		if (Page->Mapped && Free.Num() < MaxPooledUploadPagesPerSize)
+		{
+			Free.Add(Page);
+		}
+		else
+		{
+			DeleteUploadPage(Page);
 		}
 	});
+}
+
+void FWebGPUContext::DeleteUploadPage(FUploadPage* Page)
+{
+	if (Page->Buffer)
+	{
+		wgpuBufferRelease(Page->Buffer);
+	}
+	delete Page;
+}
+
+void FWebGPUContext::MapAsync(WGPUBuffer Buffer, WGPUMapMode Mode, uint64 Offset, uint64 Size, TUniqueFunction<void(bool bSuccess)>&& Handler)
+{
+	FMapRequest* Request = new FMapRequest();
+	Request->Context = this;
+	Request->Generation = DeviceGeneration;
+	Request->Handler = MoveTemp(Handler);
+
+	WGPUBufferMapCallbackInfo Info = {};
+	Info.mode = WGPUCallbackMode_AllowProcessEvents;
+	Info.callback = &FWebGPUContext::OnBufferMapped;
+	Info.userdata1 = Request;
+	PendingCallbacks++;
+	wgpuBufferMapAsync(Buffer, Mode, (size_t)Offset, (size_t)Size, Info);
+}
+
+void FWebGPUContext::OnBufferMapped(WGPUMapAsyncStatus Status, WGPUStringView Message, void* UserData1, void*)
+{
+	TUniquePtr<FMapRequest> Request(static_cast<FMapRequest*>(UserData1));
+	Request->Context->CallbackDone(Request->Generation);
+	if (Status != WGPUMapAsyncStatus_Success)
+	{
+		UE_LOG(LogWebGPU, Verbose, TEXT("Buffer map failed (%d): %s"), (int32)Status, *FWebGPUDevice::ToFString(Message));
+	}
+	Request->Handler(Status == WGPUMapAsyncStatus_Success);
+}
+
+void FWebGPUContext::CallbackDone(uint32 Generation)
+{
+	// Callbacks of a replaced device don't count: the counter was reset when it was released
+	if (Generation == DeviceGeneration && PendingCallbacks > 0)
+	{
+		PendingCallbacks--;
+	}
+}
+
+void FWebGPUContext::DestroyBufferOnWorker(WGPUBuffer Buffer)
+{
+	// Destroy frees the memory now rather than when Dawn drops its last internal reference. Commands of the
+	// open batch may still use the buffer, so it waits for that batch's submit (the GPU finishes with it first).
+	auto Destroy = [Buffer](bool)
+	{
+		wgpuBufferDestroy(Buffer);
+		wgpuBufferRelease(Buffer);
+	};
+	if (Encoder)
+	{
+		AfterSubmit(MoveTemp(Destroy));
+	}
+	else
+	{
+		Destroy(true);
+	}
+}
+
+void FWebGPUContext::AfterSubmit(TUniqueFunction<void(bool bSubmitted)>&& Action)
+{
+	BatchAfterSubmit.Add(MoveTemp(Action));
 }
 
 WGPUCommandEncoder FWebGPUContext::GetEncoder()
@@ -1253,20 +1435,27 @@ void FWebGPUContext::SubmitBatch()
 
 	WGPUDevice Dev = WorkerDevice->GetDevice();
 
-	FTimestampRequest* TimestampRequest = nullptr;
-	if (BatchQueryCount > 0)
+	// Timestamps of profiled passes are resolved into the batch and mapped after it
+	WGPUBuffer TimestampStaging = nullptr;
+	uint64 TimestampCapacity = 0;
+	const uint32 TimestampCount = BatchQueryCount;
+	TArray<TWeakPtr<FWebGPUKernel>> Profiled;
+	if (TimestampCount > 0)
 	{
-		const uint64 QueryBytes = (uint64)BatchQueryCount * sizeof(uint64);
-		wgpuCommandEncoderResolveQuerySet(Encoder, TimestampQueries, 0, BatchQueryCount, TimestampResolve, 0);
-
-		TimestampRequest = new FTimestampRequest();
-		TimestampRequest->Context = this;
-		TimestampRequest->Staging = AcquireStaging(QueryBytes, TimestampRequest->Capacity);
-		TimestampRequest->Count = BatchQueryCount;
-		TimestampRequest->Generation = DeviceGeneration;
-		TimestampRequest->Kernels = MoveTemp(BatchProfiled);
-		wgpuCommandEncoderCopyBufferToBuffer(Encoder, TimestampResolve, 0, TimestampRequest->Staging, 0, QueryBytes);
+		const uint64 QueryBytes = (uint64)TimestampCount * sizeof(uint64);
+		wgpuCommandEncoderResolveQuerySet(Encoder, TimestampQueries, 0, TimestampCount, TimestampResolve, 0);
+		TimestampStaging = AcquireStaging(QueryBytes, TimestampCapacity);
+		wgpuCommandEncoderCopyBufferToBuffer(Encoder, TimestampResolve, 0, TimestampStaging, 0, QueryBytes);
+		Profiled = MoveTemp(BatchProfiled);
 	}
+
+	// The batch copies from its upload pages: they must be unmapped when it is submitted
+	for (FUploadPage* Page : BatchUploadPages)
+	{
+		wgpuBufferUnmap(Page->Buffer);
+		Page->Mapped = nullptr;
+	}
+	CurrentUploadPage = nullptr;
 
 	WGPUCommandBuffer CommandBuffer = wgpuCommandEncoderFinish(Encoder, nullptr);
 	wgpuQueueSubmit(WorkerDevice->GetQueue(), 1, &CommandBuffer);
@@ -1276,7 +1465,7 @@ void FWebGPUContext::SubmitBatch()
 	StatSubmits++;
 	BusyPollUntil = FPlatformTime::Seconds() + Options.BusyPollMilliseconds / 1000.0;
 
-	FBatchScopeRequest* ScopeRequest = new FBatchScopeRequest{ this, FString::Join(BatchLabels, TEXT(", ")) };
+	FBatchScopeRequest* ScopeRequest = new FBatchScopeRequest{ this, DeviceGeneration, FString::Join(BatchLabels, TEXT(", ")) };
 	WGPUPopErrorScopeCallbackInfo ScopeInfo = {};
 	ScopeInfo.mode = WGPUCallbackMode_AllowProcessEvents;
 	ScopeInfo.callback = &FWebGPUContext::OnBatchScopePopped;
@@ -1284,26 +1473,66 @@ void FWebGPUContext::SubmitBatch()
 	PendingCallbacks++;
 	wgpuDevicePopErrorScope(Dev, ScopeInfo);
 
-	if (TimestampRequest)
-	{
-		WGPUBufferMapCallbackInfo MapInfo = {};
-		MapInfo.mode = WGPUCallbackMode_AllowProcessEvents;
-		MapInfo.callback = &FWebGPUContext::OnTimestampsMapped;
-		MapInfo.userdata1 = TimestampRequest;
-		PendingCallbacks++;
-		wgpuBufferMapAsync(TimestampRequest->Staging, WGPUMapMode_Read, 0, (size_t)TimestampRequest->Count * sizeof(uint64), MapInfo);
-	}
-
+	// Reset the batch first: post-submit actions may start new work
+	TArray<TUniqueFunction<void(bool)>> Actions = MoveTemp(BatchAfterSubmit);
+	TArray<FUploadPage*> Pages = MoveTemp(BatchUploadPages);
+	BatchAfterSubmit.Reset();
+	BatchUploadPages.Reset();
 	BatchLabels.Reset();
 	BatchQueryCount = 0;
 	BatchProfiled.Reset();
+	BatchCommands = 0;
+
+	for (FUploadPage* Page : Pages)
+	{
+		RecycleUploadPage(Page);
+	}
+	for (TUniqueFunction<void(bool)>& Action : Actions)
+	{
+		Action(true);
+	}
+
+	if (TimestampStaging)
+	{
+		const uint32 Generation = DeviceGeneration;
+		MapAsync(TimestampStaging, WGPUMapMode_Read, 0, (uint64)TimestampCount * sizeof(uint64),
+			[this, TimestampStaging, TimestampCapacity, TimestampCount, Generation, Profiled = MoveTemp(Profiled)](bool bSuccess)
+		{
+			if (!bSuccess)
+			{
+				wgpuBufferRelease(TimestampStaging);
+				return;
+			}
+			const uint64* Ticks = static_cast<const uint64*>(wgpuBufferGetConstMappedRange(TimestampStaging, 0, (size_t)TimestampCount * sizeof(uint64)));
+			if (Ticks)
+			{
+				for (int32 Index = 0; Index < Profiled.Num(); Index++)
+				{
+					TSharedPtr<FWebGPUKernel> Kernel = Profiled[Index].Pin();
+					if (!Kernel)
+					{
+						continue;
+					}
+					// WebGPU timestamps are nanoseconds
+					const uint64 Begin = Ticks[Index * 2];
+					const uint64 End = Ticks[Index * 2 + 1];
+					const double Ms = End > Begin ? (double)(End - Begin) / 1.0e6 : 0.0;
+					const double Average = Kernel->AverageGpuTimeMs;
+					Kernel->LastGpuTimeMs = Ms;
+					Kernel->AverageGpuTimeMs = Average > 0.0 ? Average * 0.9 + Ms * 0.1 : Ms;
+				}
+			}
+			wgpuBufferUnmap(TimestampStaging);
+			ReleaseStaging(TimestampStaging, TimestampCapacity, Generation);
+		});
+	}
 }
 
 void FWebGPUContext::OnBatchScopePopped(WGPUPopErrorScopeStatus Status, WGPUErrorType Type, WGPUStringView Message, void* UserData1, void*)
 {
 	TUniquePtr<FBatchScopeRequest> Request(static_cast<FBatchScopeRequest*>(UserData1));
 	FWebGPUContext& Self = *Request->Context;
-	Self.PendingCallbacks--;
+	Self.CallbackDone(Request->Generation);
 
 	if (Status == WGPUPopErrorScopeStatus_Success && Type != WGPUErrorType_NoError)
 	{
@@ -1313,45 +1542,10 @@ void FWebGPUContext::OnBatchScopePopped(WGPUPopErrorScopeStatus Status, WGPUErro
 	}
 }
 
-void FWebGPUContext::OnTimestampsMapped(WGPUMapAsyncStatus Status, WGPUStringView, void* UserData1, void*)
-{
-	TUniquePtr<FTimestampRequest> Request(static_cast<FTimestampRequest*>(UserData1));
-	FWebGPUContext& Self = *Request->Context;
-	Self.PendingCallbacks--;
-
-	if (Status != WGPUMapAsyncStatus_Success)
-	{
-		wgpuBufferRelease(Request->Staging);
-		return;
-	}
-
-	const uint64* Ticks = static_cast<const uint64*>(wgpuBufferGetConstMappedRange(Request->Staging, 0, (size_t)Request->Count * sizeof(uint64)));
-	if (Ticks)
-	{
-		for (int32 Index = 0; Index < Request->Kernels.Num(); Index++)
-		{
-			TSharedPtr<FWebGPUKernel> Kernel = Request->Kernels[Index].Pin();
-			if (!Kernel)
-			{
-				continue;
-			}
-			// WebGPU timestamps are nanoseconds
-			const uint64 Begin = Ticks[Index * 2];
-			const uint64 End = Ticks[Index * 2 + 1];
-			const double Ms = End > Begin ? (double)(End - Begin) / 1.0e6 : 0.0;
-			const double Average = Kernel->AverageGpuTimeMs;
-			Kernel->LastGpuTimeMs = Ms;
-			Kernel->AverageGpuTimeMs = Average > 0.0 ? Average * 0.9 + Ms * 0.1 : Ms;
-		}
-	}
-	wgpuBufferUnmap(Request->Staging);
-	Self.ReleaseStaging(Request->Staging, Request->Capacity, Request->Generation);
-}
-
 void FWebGPUContext::OnFlushDone(WGPUQueueWorkDoneStatus Status, WGPUStringView, void* UserData1, void*)
 {
 	TUniquePtr<FFlushRequest> Request(static_cast<FFlushRequest*>(UserData1));
-	Request->Context->PendingCallbacks--;
+	Request->Context->CallbackDone(Request->Generation);
 	Request->Signal->bOk = Status == WGPUQueueWorkDoneStatus_Success;
 	Request->Signal->Event->Trigger();
 }
@@ -1423,9 +1617,30 @@ void FWebGPUContext::ReleaseDeviceObjects()
 		wgpuCommandEncoderRelease(Encoder);
 		Encoder = nullptr;
 	}
+	TArray<TUniqueFunction<void(bool)>> Abandoned = MoveTemp(BatchAfterSubmit);
+	BatchAfterSubmit.Reset();
+	for (TUniqueFunction<void(bool)>& Action : Abandoned)
+	{
+		Action(false);
+	}
+	for (FUploadPage* Page : BatchUploadPages)
+	{
+		DeleteUploadPage(Page);
+	}
+	BatchUploadPages.Reset();
+	CurrentUploadPage = nullptr;
+	for (TPair<uint64, TArray<FUploadPage*>>& Pair : UploadPagePool)
+	{
+		for (FUploadPage* Page : Pair.Value)
+		{
+			DeleteUploadPage(Page);
+		}
+	}
+	UploadPagePool.Reset();
 	BatchLabels.Reset();
 	BatchQueryCount = 0;
 	BatchProfiled.Reset();
+	BatchCommands = 0;
 
 	for (TPair<uint64, TArray<WGPUBuffer>>& Pair : StagingPool)
 	{
@@ -1476,10 +1691,37 @@ void FWebGPUContext::Recover()
 			}
 		}
 
-		// Fails whatever is still pending on the old device
+		// Streams drop their slots, except memory the game still holds (an acquired frame, a slot being written)
+		bool bMemoryHeld = false;
+		for (const TWeakPtr<FWebGPUReadbackStream>& Weak : LiveReadbackStreams)
+		{
+			if (TSharedPtr<FWebGPUReadbackStream> Stream = Weak.Pin())
+			{
+				bMemoryHeld |= Stream->ReleaseForRecovery();
+			}
+		}
+		for (const TWeakPtr<FWebGPUUploadStream>& Weak : LiveUploadStreams)
+		{
+			if (TSharedPtr<FWebGPUUploadStream> Stream = Weak.Pin())
+			{
+				bMemoryHeld |= Stream->ReleaseForRecovery();
+			}
+		}
+
+		// Fails whatever is still pending on the old device. Destroying it would unmap memory the game still
+		// reads or writes, so a device with held memory is retired instead and destroyed once that is released.
 		bReleasingDevice = true;
 		WorkerDevice->SetLostHandler(nullptr);
-		WorkerDevice->Shutdown();
+		if (bMemoryHeld)
+		{
+			wgpuInstanceProcessEvents(WorkerDevice->GetInstance());
+			RetiredDevices.Add(WorkerDevice);
+			bHasRetiredDevices = true;
+		}
+		else
+		{
+			WorkerDevice->Shutdown();
+		}
 		bReleasingDevice = false;
 		ReleaseDeviceObjects();
 		{
@@ -1529,6 +1771,16 @@ void FWebGPUContext::Recover()
 		}
 	}
 
+	LiveReadbackStreams.RemoveAll([](const TWeakPtr<FWebGPUReadbackStream>& Weak) { return !Weak.IsValid(); });
+	LiveUploadStreams.RemoveAll([](const TWeakPtr<FWebGPUUploadStream>& Weak) { return !Weak.IsValid(); });
+	for (const TWeakPtr<FWebGPUUploadStream>& Weak : LiveUploadStreams)
+	{
+		if (TSharedPtr<FWebGPUUploadStream> Stream = Weak.Pin())
+		{
+			Stream->RecreateAfterRecovery(*this);
+		}
+	}
+
 	UE_LOG(LogWebGPU, Log, TEXT("WebGPU device recreated (generation %u): %d buffers, %d kernels restored (buffer contents are zeroed)"),
 		Generation, LiveBuffers.Num(), LiveKernels.Num());
 
@@ -1573,8 +1825,25 @@ void FWebGPUContext::ReleaseAllResources()
 			Kernel->ReleaseGPU();
 		}
 	}
+	for (const TWeakPtr<FWebGPUReadbackStream>& Weak : LiveReadbackStreams)
+	{
+		if (TSharedPtr<FWebGPUReadbackStream> Stream = Weak.Pin())
+		{
+			Stream->ReleaseForRecovery();
+		}
+	}
+	for (const TWeakPtr<FWebGPUUploadStream>& Weak : LiveUploadStreams)
+	{
+		if (TSharedPtr<FWebGPUUploadStream> Stream = Weak.Pin())
+		{
+			Stream->ReleaseForRecovery();
+		}
+	}
 	LiveBuffers.Reset();
 	LiveKernels.Reset();
+	LiveReadbackStreams.Reset();
+	LiveUploadStreams.Reset();
+	ShutdownRetiredDevices(true);
 
 	if (WorkerDevice)
 	{
@@ -1590,4 +1859,46 @@ void FWebGPUContext::ReleaseAllResources()
 	}
 	WorkerDevice.Reset();
 	PendingCallbacks = 0;
+}
+
+void FWebGPUContext::ShutdownRetiredDevices(bool bForce)
+{
+	for (const TSharedPtr<FWebGPUDevice>& Retired : RetiredDevices)
+	{
+		wgpuInstanceProcessEvents(Retired->GetInstance());
+	}
+
+	if (!bForce)
+	{
+		const uint32 Generation = DeviceGeneration;
+		for (const TWeakPtr<FWebGPUReadbackStream>& Weak : LiveReadbackStreams)
+		{
+			TSharedPtr<FWebGPUReadbackStream> Stream = Weak.Pin();
+			if (Stream && Stream->HoldsRetiredMemory(Generation))
+			{
+				return;
+			}
+		}
+		for (const TWeakPtr<FWebGPUUploadStream>& Weak : LiveUploadStreams)
+		{
+			TSharedPtr<FWebGPUUploadStream> Stream = Weak.Pin();
+			if (Stream && Stream->HoldsRetiredMemory(Generation))
+			{
+				return;
+			}
+		}
+	}
+
+	bReleasingDevice = true;
+	for (const TSharedPtr<FWebGPUDevice>& Retired : RetiredDevices)
+	{
+		Retired->Shutdown();
+	}
+	bReleasingDevice = false;
+	if (RetiredDevices.Num() > 0)
+	{
+		UE_LOG(LogWebGPU, Log, TEXT("Released the lost WebGPU device: nothing holds its mapped memory anymore"));
+	}
+	RetiredDevices.Reset();
+	bHasRetiredDevices = false;
 }

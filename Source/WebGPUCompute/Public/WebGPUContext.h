@@ -13,6 +13,9 @@
 #include <atomic>
 
 class FWebGPUContext;
+class FWebGPUReadbackStream;
+class FWebGPUUploadStream;
+enum class EWebGPUStreamPolicy : uint8;
 
 using FWebGPUReadCallback = TUniqueFunction<void(bool bSuccess, TArray<uint8>&& Data)>;
 using FWebGPUCompileCallback = TFunction<void(bool bSuccess, const TArray<FWebGPUCompileMessage>& Messages)>;
@@ -147,9 +150,9 @@ struct FWebGPUKernelDesc
 /**
  * The WebGPU runtime: one device plus a worker thread that executes every command in order.
  *
- * Calls return immediately from any thread. Dispatches enqueued back to back are encoded into one
- * command buffer and submitted when the queue runs dry; writes and reads keep their order relative
- * to dispatches. Results come back through callbacks on the game thread (default) or the worker.
+ * Calls return immediately from any thread. Commands enqueued back to back (writes, dispatches, reads) are
+ * encoded in order into one command buffer, submitted when the queue runs dry. Results come back through
+ * callbacks on the game thread (default) or the worker, or through streams (WebGPUStreams.h).
  * If the device is lost (TDR, driver reset) the worker recreates it, recreates buffers (zeroed) and
  * recompiles kernels, then broadcasts OnDeviceRecovered so owners can re-upload their data.
  */
@@ -254,6 +257,14 @@ public:
 			}, EWebGPUCallbackThread::GameThread);
 	}
 
+	// Streams (WebGPUStreams.h)
+
+	/** A ring of Slots readback slots of SlotBytes each, for per-frame results (see FWebGPUReadbackStream). */
+	TSharedRef<FWebGPUReadbackStream> CreateReadbackStream(uint64 SlotBytes, int32 Slots, EWebGPUStreamPolicy Policy, const FString& Label = FString());
+
+	/** A ring of Slots upload slots of SlotBytes each that stay mapped for writing (see FWebGPUUploadStream). */
+	TSharedRef<FWebGPUUploadStream> CreateUploadStream(uint64 SlotBytes, int32 Slots = 3, const FString& Label = FString());
+
 	/** Blocks until every command enqueued so far has finished on the GPU. Never call from the worker thread. */
 	bool Flush(double TimeoutSeconds = 10.0);
 
@@ -268,6 +279,9 @@ public:
 	/** The current device; replaced after a device loss. Thread-safe Dawn access for interop. */
 	TSharedPtr<FWebGPUDevice> GetDevice() const;
 	uint32 GetDeviceGeneration() const { return DeviceGeneration; }
+
+	/** True while a lost device is kept alive because the game still holds memory it mapped (see the streams). */
+	bool HasRetiredDevices() const { return bHasRetiredDevices; }
 	FWebGPUStats GetStats() const;
 	bool IsInWorkerThread() const;
 
@@ -275,6 +289,10 @@ public:
 	TMulticastDelegate<void(uint32 /*Generation*/)> OnDeviceRecovered;
 
 private:
+	friend class FWebGPUBuffer;
+	friend class FWebGPUReadbackStream;
+	friend class FWebGPUUploadStream;
+
 	explicit FWebGPUContext(const FWebGPUDeviceOptions& InOptions);
 	bool Start();
 
@@ -289,13 +307,25 @@ private:
 	bool UpdateBindGroups(FWebGPUKernel& Kernel);
 	void WarnOnce(FWebGPUKernel& Kernel, const FString& Message);
 	void ReadBufferOnWorker(FWebGPUBuffer& Buffer, uint64 Offset, uint64 Size, FWebGPUReadCallback&& Callback, EWebGPUCallbackThread CallbackThread);
+	void UploadOnWorker(FWebGPUBuffer& Buffer, uint64 Offset, const void* Data, uint64 Size);
+	void DestroyBufferOnWorker(WGPUBuffer Buffer);
 	WGPUCommandEncoder GetEncoder();
+	/** Runs after the current batch is submitted (true), or when it is abandoned on device loss (false). */
+	void AfterSubmit(TUniqueFunction<void(bool bSubmitted)>&& Action);
 	void SubmitBatch();
+	void MapAsync(WGPUBuffer Buffer, WGPUMapMode Mode, uint64 Offset, uint64 Size, TUniqueFunction<void(bool bSuccess)>&& Handler);
+	void CallbackDone(uint32 Generation);
+	WGPUBuffer CreateMappableBuffer(WGPUBufferUsage Usage, uint64 Size, bool bMappedAtCreation, const char* Label);
 	WGPUBuffer AcquireStaging(uint64 Size, uint64& OutCapacity);
 	void ReleaseStaging(WGPUBuffer Staging, uint64 Capacity, uint32 Generation);
+	struct FUploadPage;
+	FUploadPage* AllocateUpload(uint64 Size, uint64& OutOffset);
+	void RecycleUploadPage(FUploadPage* Page);
+	void DeleteUploadPage(FUploadPage* Page);
 	void CreateDeviceObjects();
 	void ReleaseDeviceObjects();
 	void Recover();
+	void ShutdownRetiredDevices(bool bForce);
 	void ReleaseAllResources();
 	bool HasDevice() const { return WorkerDevice.IsValid() && WorkerDevice->IsValid(); }
 	void Wake();
@@ -303,15 +333,13 @@ private:
 	static void Deliver(EWebGPUCallbackThread Thread, TUniqueFunction<void()>&& Function);
 
 	// Async callback trampolines (run on the worker inside wgpuInstanceProcessEvents)
-	struct FReadRequest;
+	struct FMapRequest;
 	struct FCompileRequest;
 	struct FBatchScopeRequest;
-	struct FTimestampRequest;
 	struct FFlushRequest;
-	static void OnReadMapped(WGPUMapAsyncStatus Status, WGPUStringView Message, void* UserData1, void* UserData2);
+	static void OnBufferMapped(WGPUMapAsyncStatus Status, WGPUStringView Message, void* UserData1, void* UserData2);
 	static void OnPipelineCreated(WGPUCreatePipelineAsyncStatus Status, WGPUComputePipeline Pipeline, WGPUStringView Message, void* UserData1, void* UserData2);
 	static void OnBatchScopePopped(WGPUPopErrorScopeStatus Status, WGPUErrorType Type, WGPUStringView Message, void* UserData1, void* UserData2);
-	static void OnTimestampsMapped(WGPUMapAsyncStatus Status, WGPUStringView Message, void* UserData1, void* UserData2);
 	static void OnFlushDone(WGPUQueueWorkDoneStatus Status, WGPUStringView Message, void* UserData1, void* UserData2);
 
 	FWebGPUDeviceOptions Options;
@@ -325,6 +353,7 @@ private:
 	std::atomic<uint32> WorkerThreadId = 0;
 	std::atomic<bool> bStopping = false;
 	std::atomic<bool> bDeviceLostSignal = false;
+	std::atomic<bool> bHasRetiredDevices = false;
 	FEvent* WakeEvent = nullptr;
 	TQueue<TUniqueFunction<void()>, EQueueMode::Mpsc> Commands;
 
@@ -332,6 +361,11 @@ private:
 	TSharedPtr<FWebGPUDevice> WorkerDevice;
 	WGPUCommandEncoder Encoder = nullptr;
 	TArray<FString> BatchLabels;
+	TArray<TUniqueFunction<void(bool)>> BatchAfterSubmit;
+	TArray<FUploadPage*> BatchUploadPages;
+	FUploadPage* CurrentUploadPage = nullptr;
+	TMap<uint64, TArray<FUploadPage*>> UploadPagePool;
+	int32 BatchCommands = 0;
 	int32 PendingCallbacks = 0;
 	bool bReleasingDevice = false;
 	double BusyPollUntil = 0.0;
@@ -339,6 +373,10 @@ private:
 	TMap<uint64, TArray<WGPUBuffer>> StagingPool;
 	TArray<TWeakPtr<FWebGPUBuffer>> LiveBuffers;
 	TArray<TWeakPtr<FWebGPUKernel>> LiveKernels;
+	TArray<TWeakPtr<FWebGPUReadbackStream>> LiveReadbackStreams;
+	TArray<TWeakPtr<FWebGPUUploadStream>> LiveUploadStreams;
+	/** Lost devices kept alive (not destroyed) while the game still holds memory they mapped. */
+	TArray<TSharedPtr<FWebGPUDevice>> RetiredDevices;
 
 	static constexpr uint32 MaxTimestampQueries = 128;
 	WGPUQuerySet TimestampQueries = nullptr;
