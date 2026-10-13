@@ -98,15 +98,6 @@ struct FWebGPUContext::FMapRequest
 	TUniqueFunction<void(bool bSuccess)> Handler;
 };
 
-/** Upload memory for WriteBuffer: mapped for writing, unmapped for the submit that copies from it, then remapped. */
-struct FWebGPUContext::FUploadPage
-{
-	WGPUBuffer Buffer = nullptr;
-	uint64 Capacity = 0;
-	uint64 Used = 0;
-	uint8* Mapped = nullptr;
-	uint32 Generation = 0;
-};
 
 struct FWebGPUContext::FCompileRequest
 {
@@ -569,6 +560,7 @@ void FWebGPUContext::SetBuffer(const TSharedRef<FWebGPUKernel>& Kernel, uint32 G
 		if (Buffer)
 		{
 			FWebGPUKernel::FBinding& Entry = Kernel->Bindings.FindOrAdd(Group).FindOrAdd(Binding);
+			Entry = FWebGPUKernel::FBinding();
 			Entry.Buffer = Buffer;
 			Entry.Offset = Offset;
 			Entry.Size = Size;
@@ -600,6 +592,7 @@ void FWebGPUContext::SetBufferByName(const TSharedRef<FWebGPUKernel>& Kernel, co
 		if (Buffer)
 		{
 			FWebGPUKernel::FBinding& Entry = Kernel->NamedBindings.FindOrAdd(Name);
+			Entry = FWebGPUKernel::FBinding();
 			Entry.Buffer = Buffer;
 			Entry.Offset = Offset;
 			Entry.Size = Size;
@@ -1013,65 +1006,115 @@ bool FWebGPUContext::UpdateBindGroups(FWebGPUKernel& Kernel)
 	}
 
 	TSortedMap<uint32, TArray<WGPUBindGroupEntry>> Groups;
+	Kernel.SharedTextures.Reset();
 	if (Entry)
 	{
 		// Exactly the resources the entry point uses: extra bindings are ignored, missing or invalid ones skip the dispatch
 		TArray<FString> Problems;
 		for (const FWebGPUBindingInfo& Info : Entry->Bindings)
 		{
-			if (!Info.IsBuffer())
-			{
-				Problems.Add(FString::Printf(TEXT("'%s' is a texture or sampler, which can't be bound yet"), *Info.Name));
-				continue;
-			}
 			const FWebGPUKernel::FBinding* const* Found = Resolved.Find(Key(Info.Group, Info.Binding));
-			if (!Found || !(*Found)->Buffer)
-			{
-				Problems.Add(FString::Printf(TEXT("'%s' (@group(%d) @binding(%d)) is not bound"), *Info.Name, Info.Group, Info.Binding));
-				continue;
-			}
-			const FWebGPUKernel::FBinding& Bound = **Found;
-			const FWebGPUBuffer& Buffer = *Bound.Buffer;
-			if (!Buffer.Handle)
-			{
-				Problems.Add(FString::Printf(TEXT("'%s': buffer '%s' has no GPU memory"), *Info.Name, *Buffer.Label));
-				continue;
-			}
-			const uint64 BoundSize = Bound.Size == WGPU_WHOLE_SIZE ? Buffer.Size - FMath::Min(Bound.Offset, Buffer.Size) : Bound.Size;
-			if (BoundSize < (uint64)Info.MinSize)
-			{
-				Problems.Add(FString::Printf(TEXT("'%s' needs at least %lld bytes, buffer '%s' provides %llu"), *Info.Name, Info.MinSize, *Buffer.Label, BoundSize));
-			}
-			if (Info.Type == EWebGPUBindingType::UniformBuffer && !EnumHasAnyFlags(Buffer.Usage, EWebGPUBufferUsage::Uniform))
-			{
-				Problems.Add(FString::Printf(TEXT("'%s' is var<uniform> but buffer '%s' was not created with the Uniform usage"), *Info.Name, *Buffer.Label));
-			}
-			else if (Info.Type != EWebGPUBindingType::UniformBuffer && !EnumHasAnyFlags(Buffer.Usage, EWebGPUBufferUsage::Storage))
-			{
-				Problems.Add(FString::Printf(TEXT("'%s' is var<storage> but buffer '%s' was not created with the Storage usage"), *Info.Name, *Buffer.Label));
-			}
-
-			// Struct buffers: the UStruct layout should be the shader's (warn only; the bytes still flow)
-			if (Buffer.ElementLayout)
-			{
-				TSharedPtr<const FWebGPUTypeLayout> Element = Info.GetRuntimeArrayElement();
-				if (!Element && Info.Layout && Info.Layout->Kind == FWebGPUTypeLayout::EKind::Struct)
-				{
-					Element = Info.Layout;
-				}
-				FString Differences;
-				if (Element && Element->Kind == FWebGPUTypeLayout::EKind::Struct && !Buffer.ElementLayout->Matches(*Element, Differences))
-				{
-					WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': '%s' holds %s but the shader reads %s: %s"),
-						*Kernel.Label, *Info.Name, *Buffer.ElementLayout->GetStructName(), *Element->Name, *Differences));
-				}
-			}
-
-			WGPUBindGroupEntry& BindEntry = Groups.FindOrAdd((uint32)Info.Group).Add_GetRef(WGPU_BIND_GROUP_ENTRY_INIT);
+			const FWebGPUKernel::FBinding* Bound = Found ? *Found : nullptr;
+			WGPUBindGroupEntry BindEntry = WGPU_BIND_GROUP_ENTRY_INIT;
 			BindEntry.binding = (uint32)Info.Binding;
-			BindEntry.buffer = Buffer.Handle;
-			BindEntry.offset = Bound.Offset;
-			BindEntry.size = Bound.Size;
+
+			if (Info.Type == EWebGPUBindingType::Sampler)
+			{
+				const EWebGPUSampler Which = Bound && Bound->Sampler.IsSet() ? Bound->Sampler.GetValue() : EWebGPUSampler::LinearClamp;
+				BindEntry.sampler = Samplers[(int32)Which];
+			}
+			else if (Info.IsTexture())
+			{
+				if (!Bound || !Bound->Texture)
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' (@group(%d) @binding(%d)) is not bound to a texture"), *Info.Name, Info.Group, Info.Binding));
+					continue;
+				}
+				const FWebGPUTexture& Texture = *Bound->Texture;
+				if (Info.TextureDimension != TEXT("2d"))
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' is a %s texture; only 2D textures can be bound"), *Info.Name, *Info.TextureDimension));
+					continue;
+				}
+				if (!Texture.View)
+				{
+					Problems.Add(FString::Printf(TEXT("'%s': texture '%s' has no GPU memory"), *Info.Name, *Texture.Label));
+					continue;
+				}
+				if (Info.Type == EWebGPUBindingType::StorageTexture)
+				{
+					if (!EnumHasAnyFlags(Texture.Usage, EWebGPUTextureUsage::Storage))
+					{
+						Problems.Add(FString::Printf(TEXT("'%s' is a storage texture but texture '%s' was not created with the Storage usage"), *Info.Name, *Texture.Label));
+					}
+					if (Info.TexelFormat != FWebGPUTexture::WgslFormat(Texture.Format))
+					{
+						Problems.Add(FString::Printf(TEXT("'%s' is texture_storage_2d<%s> but texture '%s' is %s"), *Info.Name, *Info.TexelFormat, *Texture.Label, FWebGPUTexture::WgslFormat(Texture.Format)));
+					}
+				}
+				else if (!EnumHasAnyFlags(Texture.Usage, EWebGPUTextureUsage::Sampled))
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' is a texture_2d but texture '%s' was not created with the Sampled usage"), *Info.Name, *Texture.Label));
+				}
+				if (Texture.Shared)
+				{
+					Kernel.SharedTextures.Add(Bound->Texture);
+				}
+				BindEntry.textureView = Texture.View;
+			}
+			else if (Info.IsBuffer())
+			{
+				if (!Bound || !Bound->Buffer)
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' (@group(%d) @binding(%d)) is not bound"), *Info.Name, Info.Group, Info.Binding));
+					continue;
+				}
+				const FWebGPUBuffer& Buffer = *Bound->Buffer;
+				if (!Buffer.Handle)
+				{
+					Problems.Add(FString::Printf(TEXT("'%s': buffer '%s' has no GPU memory"), *Info.Name, *Buffer.Label));
+					continue;
+				}
+				const uint64 BoundSize = Bound->Size == WGPU_WHOLE_SIZE ? Buffer.Size - FMath::Min(Bound->Offset, Buffer.Size) : Bound->Size;
+				if (BoundSize < (uint64)Info.MinSize)
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' needs at least %lld bytes, buffer '%s' provides %llu"), *Info.Name, Info.MinSize, *Buffer.Label, BoundSize));
+				}
+				if (Info.Type == EWebGPUBindingType::UniformBuffer && !EnumHasAnyFlags(Buffer.Usage, EWebGPUBufferUsage::Uniform))
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' is var<uniform> but buffer '%s' was not created with the Uniform usage"), *Info.Name, *Buffer.Label));
+				}
+				else if (Info.Type != EWebGPUBindingType::UniformBuffer && !EnumHasAnyFlags(Buffer.Usage, EWebGPUBufferUsage::Storage))
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' is var<storage> but buffer '%s' was not created with the Storage usage"), *Info.Name, *Buffer.Label));
+				}
+
+				// Struct buffers: the UStruct layout should be the shader's (warn only; the bytes still flow)
+				if (Buffer.ElementLayout)
+				{
+					TSharedPtr<const FWebGPUTypeLayout> Element = Info.GetRuntimeArrayElement();
+					if (!Element && Info.Layout && Info.Layout->Kind == FWebGPUTypeLayout::EKind::Struct)
+					{
+						Element = Info.Layout;
+					}
+					FString Differences;
+					if (Element && Element->Kind == FWebGPUTypeLayout::EKind::Struct && !Buffer.ElementLayout->Matches(*Element, Differences))
+					{
+						WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': '%s' holds %s but the shader reads %s: %s"),
+							*Kernel.Label, *Info.Name, *Buffer.ElementLayout->GetStructName(), *Element->Name, *Differences));
+					}
+				}
+
+				BindEntry.buffer = Buffer.Handle;
+				BindEntry.offset = Bound->Offset;
+				BindEntry.size = Bound->Size;
+			}
+			else
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' is a kind of resource that can't be bound yet"), *Info.Name));
+				continue;
+			}
+			Groups.FindOrAdd((uint32)Info.Group).Add(BindEntry);
 		}
 		if (Problems.Num() > 0)
 		{
@@ -1085,19 +1128,33 @@ bool FWebGPUContext::UpdateBindGroups(FWebGPUKernel& Kernel)
 		for (const TPair<uint64, const FWebGPUKernel::FBinding*>& Pair : Resolved)
 		{
 			const FWebGPUKernel::FBinding& Bound = *Pair.Value;
-			if (!Bound.Buffer || !Bound.Buffer->Handle)
-			{
-				WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': a bound buffer has no GPU memory"), *Kernel.Label));
-				return false;
-			}
 			WGPUBindGroupEntry& BindEntry = Groups.FindOrAdd((uint32)(Pair.Key >> 32)).Add_GetRef(WGPU_BIND_GROUP_ENTRY_INIT);
 			BindEntry.binding = (uint32)(Pair.Key & 0xffffffff);
-			BindEntry.buffer = Bound.Buffer->Handle;
-			BindEntry.offset = Bound.Offset;
-			BindEntry.size = Bound.Size;
+			if (Bound.Sampler.IsSet())
+			{
+				BindEntry.sampler = Samplers[(int32)Bound.Sampler.GetValue()];
+			}
+			else if (Bound.Texture && Bound.Texture->View)
+			{
+				BindEntry.textureView = Bound.Texture->View;
+			}
+			else if (Bound.Buffer && Bound.Buffer->Handle)
+			{
+				BindEntry.buffer = Bound.Buffer->Handle;
+				BindEntry.offset = Bound.Offset;
+				BindEntry.size = Bound.Size;
+			}
+			else
+			{
+				WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': a bound resource has no GPU memory"), *Kernel.Label));
+				return false;
+			}
 		}
 	}
 
+	// WebGPU's own validation (sample types, storage access, formats) is checked here too, so a binding it
+	// rejects skips this kernel instead of failing the whole batch. Rebuilt only when bindings change.
+	WorkerDevice->PushErrorScopes();
 	for (const TPair<uint32, TArray<WGPUBindGroupEntry>>& Group : Groups)
 	{
 		WGPUBindGroupLayout Layout = wgpuComputePipelineGetBindGroupLayout(Kernel.Pipeline, Group.Key);
@@ -1107,6 +1164,14 @@ bool FWebGPUContext::UpdateBindGroups(FWebGPUKernel& Kernel)
 		Desc.entries = Group.Value.GetData();
 		Kernel.BindGroups.Add(Group.Key, wgpuDeviceCreateBindGroup(WorkerDevice->GetDevice(), &Desc));
 		wgpuBindGroupLayoutRelease(Layout);
+	}
+	FString BindError;
+	if (!WorkerDevice->PopErrorScopes(BindError))
+	{
+		Kernel.ReleaseBindGroups();
+		Kernel.bBindGroupsDirty = false;
+		WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s' not dispatched: WebGPU rejected its bindings: %s"), *Kernel.Label, *BindError));
+		return false;
 	}
 	Kernel.bBindingsValid = true;
 	return true;
@@ -1137,6 +1202,17 @@ void FWebGPUContext::EncodeDispatch(const TSharedRef<FWebGPUKernel>& KernelRef, 
 	{
 		StatSkippedDispatches++;
 		return;
+	}
+	for (const TWeakPtr<FWebGPUTexture>& Weak : Kernel.SharedTextures)
+	{
+		TSharedPtr<FWebGPUTexture> Texture = Weak.Pin();
+		if (Texture && !Texture->bAccessing)
+		{
+			StatSkippedDispatches++;
+			WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s' not dispatched: shared texture '%s' is only usable between BeginTextureAccess and EndTextureAccess"),
+				*Kernel.Label, *Texture->GetLabel()));
+			return;
+		}
 	}
 
 	FTCHARToUTF8 Label(*Kernel.Label);
@@ -1277,14 +1353,18 @@ WGPUBuffer FWebGPUContext::CreateMappableBuffer(WGPUBufferUsage Usage, uint64 Si
 	return Buffer;
 }
 
-FWebGPUContext::FUploadPage* FWebGPUContext::AllocateUpload(uint64 Size, uint64& OutOffset)
+FWebGPUContext::FUploadPage* FWebGPUContext::AllocateUpload(uint64 Size, uint64& OutOffset, uint64 Alignment)
 {
 	const uint64 Aligned = Align(Size, (uint64)4);
-	if (CurrentUploadPage && CurrentUploadPage->Used + Aligned <= CurrentUploadPage->Capacity)
+	if (CurrentUploadPage)
 	{
-		OutOffset = CurrentUploadPage->Used;
-		CurrentUploadPage->Used += Aligned;
-		return CurrentUploadPage;
+		const uint64 Start = Align(CurrentUploadPage->Used, Alignment);
+		if (Start + Aligned <= CurrentUploadPage->Capacity)
+		{
+			OutOffset = Start;
+			CurrentUploadPage->Used = Start + Aligned;
+			return CurrentUploadPage;
+		}
 	}
 
 	const uint64 Capacity = FMath::Max<uint64>(UploadPageSize, FMath::RoundUpToPowerOfTwo64(Aligned));
@@ -1591,7 +1671,23 @@ void FWebGPUContext::ReleaseStaging(WGPUBuffer Staging, uint64 Capacity, uint32 
 
 void FWebGPUContext::CreateDeviceObjects()
 {
-	if (!WorkerDevice || !WorkerDevice->HasFeature(WGPUFeatureName_TimestampQuery))
+	if (!WorkerDevice)
+	{
+		return;
+	}
+
+	// Built-in samplers, indexed by EWebGPUSampler
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Samplers); Index++)
+	{
+		const bool bLinear = Index == (int32)EWebGPUSampler::LinearClamp || Index == (int32)EWebGPUSampler::LinearRepeat;
+		const bool bRepeat = Index == (int32)EWebGPUSampler::LinearRepeat || Index == (int32)EWebGPUSampler::NearestRepeat;
+		WGPUSamplerDescriptor SamplerDesc = WGPU_SAMPLER_DESCRIPTOR_INIT;
+		SamplerDesc.addressModeU = SamplerDesc.addressModeV = SamplerDesc.addressModeW = bRepeat ? WGPUAddressMode_Repeat : WGPUAddressMode_ClampToEdge;
+		SamplerDesc.magFilter = SamplerDesc.minFilter = bLinear ? WGPUFilterMode_Linear : WGPUFilterMode_Nearest;
+		Samplers[Index] = wgpuDeviceCreateSampler(WorkerDevice->GetDevice(), &SamplerDesc);
+	}
+
+	if (!WorkerDevice->HasFeature(WGPUFeatureName_TimestampQuery))
 	{
 		return;
 	}
@@ -1651,6 +1747,14 @@ void FWebGPUContext::ReleaseDeviceObjects()
 	}
 	StagingPool.Reset();
 
+	for (WGPUSampler& Sampler : Samplers)
+	{
+		if (Sampler)
+		{
+			wgpuSamplerRelease(Sampler);
+			Sampler = nullptr;
+		}
+	}
 	if (TimestampQueries)
 	{
 		wgpuQuerySetRelease(TimestampQueries);
@@ -1688,6 +1792,13 @@ void FWebGPUContext::Recover()
 			if (TSharedPtr<FWebGPUKernel> Kernel = Weak.Pin())
 			{
 				Kernel->ReleaseGPU();
+			}
+		}
+		for (const TWeakPtr<FWebGPUTexture>& Weak : LiveTextures)
+		{
+			if (TSharedPtr<FWebGPUTexture> Texture = Weak.Pin())
+			{
+				ReleaseTextureHandle(*Texture);
 			}
 		}
 
@@ -1762,6 +1873,15 @@ void FWebGPUContext::Recover()
 		}
 	}
 
+	LiveTextures.RemoveAll([](const TWeakPtr<FWebGPUTexture>& Weak) { return !Weak.IsValid(); });
+	for (const TWeakPtr<FWebGPUTexture>& Weak : LiveTextures)
+	{
+		if (TSharedPtr<FWebGPUTexture> Texture = Weak.Pin())
+		{
+			CreateTextureHandle(*Texture);
+		}
+	}
+
 	LiveKernels.RemoveAll([](const TWeakPtr<FWebGPUKernel>& Weak) { return !Weak.IsValid(); });
 	for (const TWeakPtr<FWebGPUKernel>& Weak : LiveKernels)
 	{
@@ -1781,8 +1901,8 @@ void FWebGPUContext::Recover()
 		}
 	}
 
-	UE_LOG(LogWebGPU, Log, TEXT("WebGPU device recreated (generation %u): %d buffers, %d kernels restored (buffer contents are zeroed)"),
-		Generation, LiveBuffers.Num(), LiveKernels.Num());
+	UE_LOG(LogWebGPU, Log, TEXT("WebGPU device recreated (generation %u): %d buffers, %d textures, %d kernels restored (buffer and texture contents are zeroed; shared textures are imported again)"),
+		Generation, LiveBuffers.Num(), LiveTextures.Num(), LiveKernels.Num());
 
 	TWeakPtr<FWebGPUContext> WeakSelf = AsShared();
 	Deliver(EWebGPUCallbackThread::GameThread, [WeakSelf, Generation]()
@@ -1839,8 +1959,16 @@ void FWebGPUContext::ReleaseAllResources()
 			Stream->ReleaseForRecovery();
 		}
 	}
+	for (const TWeakPtr<FWebGPUTexture>& Weak : LiveTextures)
+	{
+		if (TSharedPtr<FWebGPUTexture> Texture = Weak.Pin())
+		{
+			ReleaseTextureHandle(*Texture);
+		}
+	}
 	LiveBuffers.Reset();
 	LiveKernels.Reset();
+	LiveTextures.Reset();
 	LiveReadbackStreams.Reset();
 	LiveUploadStreams.Reset();
 	ShutdownRetiredDevices(true);

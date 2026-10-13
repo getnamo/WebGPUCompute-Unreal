@@ -92,6 +92,15 @@ public:
 	double GetCaptureTime() const { return CaptureTime; }
 	double GetReadyTime() const { return ReadyTime; }
 
+	/** Texture captures: size, bytes per row of pixels, and bytes between rows in GetData() (256-byte aligned). 0 for buffers. */
+	uint32 GetWidth() const { return Width; }
+	uint32 GetHeight() const { return Height; }
+	uint32 GetRowBytes() const { return RowBytes; }
+	uint32 GetRowPitch() const { return RowPitch; }
+
+	/** The data with texture rows tightly packed (buffers: as is). */
+	void CopyTo(TArray<uint8>& OutBytes) const;
+
 	/** The bytes as an array of T (plain types: float, uint32, FVector4f, ...). */
 	template <typename T>
 	TConstArrayView<T> View() const
@@ -128,6 +137,10 @@ private:
 	uint64 CaptureFrame = 0;
 	double CaptureTime = 0.0;
 	double ReadyTime = 0.0;
+	uint32 Width = 0;
+	uint32 Height = 0;
+	uint32 RowBytes = 0;
+	uint32 RowPitch = 0;
 };
 
 /**
@@ -148,6 +161,12 @@ public:
 	 * False when the capture was dropped (see EWebGPUStreamPolicy) or failed. Never call from the worker thread.
 	 */
 	bool Capture(const TSharedRef<FWebGPUBuffer>& Source, uint64 Offset = 0, uint64 Size = WGPU_WHOLE_SIZE);
+
+	/**
+	 * Copies a whole texture into a slot. Its rows are 256-byte aligned there (see the frame's GetRowPitch,
+	 * or CopyTo for tight rows). Shared textures must be inside BeginTextureAccess / EndTextureAccess.
+	 */
+	bool CaptureTexture(const TSharedRef<FWebGPUTexture>& Source);
 
 	/** Latest: the newest ready frame (older ready frames are skipped). Queue and Lockstep: the oldest one, in order. */
 	bool Acquire(FWebGPUReadbackFrame& OutFrame);
@@ -193,6 +212,10 @@ private:
 		double CaptureTime = 0.0;
 		double ReadyTime = 0.0;
 		const uint8* Mapped = nullptr;
+		uint32 Width = 0;
+		uint32 Height = 0;
+		uint32 RowBytes = 0;
+		uint32 RowPitch = 0;
 
 		// Worker thread only
 		WGPUBuffer Buffer = nullptr;
@@ -201,11 +224,18 @@ private:
 	};
 
 	FWebGPUReadbackStream() = default;
+	/** Claims a slot for a capture, or INDEX_NONE (counted as dropped). */
+	int32 ReserveSlot(uint64 Size, uint32 Width, uint32 Height, uint32 RowBytes, uint32 RowPitch, uint64& OutSequence);
+	bool FinishCapture(FWebGPUContext& Ctx, int32 Slot, uint64 Sequence, TUniqueFunction<void()>&& Command);
 	void ReleaseSlot(int32 Slot, uint64 Sequence);
 	bool WaitForSequence(int32 Slot, uint64 Sequence, double TimeoutSeconds);
 
 	// Worker thread
+	/** The slot's buffer, of the current device and unmapped, or null (the slot failed). */
+	WGPUBuffer PrepareSlot(FWebGPUContext& Ctx, int32 Slot, uint64 Sequence);
+	void SubmitSlot(FWebGPUContext& Ctx, int32 Slot, uint64 Sequence, uint64 Size);
 	void CaptureOnWorker(FWebGPUContext& Ctx, int32 Slot, uint64 Sequence, FWebGPUBuffer& Source, uint64 Offset, uint64 Size);
+	void CaptureTextureOnWorker(FWebGPUContext& Ctx, int32 Slot, uint64 Sequence, FWebGPUTexture& Source);
 	void FinishMap(FWebGPUContext& Ctx, int32 Slot, uint64 Sequence, uint32 Generation, bool bSuccess);
 	void FailSlot(int32 Slot, uint64 Sequence);
 	/** Releases the slots' buffers; true if the consumer still holds mapped memory of the lost device. */

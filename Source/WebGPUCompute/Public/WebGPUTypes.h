@@ -19,6 +19,56 @@ enum class EWebGPUBufferUsage : uint8
 };
 ENUM_CLASS_FLAGS(EWebGPUBufferUsage)
 
+/** Texel formats a WebGPU texture can have (WGSL storage format spelling in brackets). */
+UENUM(BlueprintType)
+enum class EWebGPUTextureFormat : uint8
+{
+	/** rgba8unorm */
+	RGBA8Unorm,
+	/** bgra8unorm (UE's PF_B8G8R8A8; storage use needs the bgra8unorm-storage feature) */
+	BGRA8Unorm,
+	/** rgba16float (UE's PF_FloatRGBA) */
+	RGBA16Float,
+	/** rgba32float */
+	RGBA32Float,
+	/** r32float */
+	R32Float,
+	/** rg32float */
+	RG32Float,
+	/** r32uint */
+	R32Uint,
+	/** r32sint */
+	R32Sint,
+	/** r16float (not a core storage format) */
+	R16Float,
+	/** rg16float (not a core storage format) */
+	RG16Float,
+	/** r8unorm (not a core storage format) */
+	R8Unorm,
+};
+
+/** How a texture is bound in shaders. Copy usages are always added. */
+UENUM(BlueprintType, meta = (Bitflags, UseEnumValuesAsMaskValuesInEditor = "true"))
+enum class EWebGPUTextureUsage : uint8
+{
+	None = 0 UMETA(Hidden),
+	/** texture_storage_2d (textureStore / textureLoad) */
+	Storage = 1 << 0,
+	/** texture_2d (textureLoad / textureSample) */
+	Sampled = 1 << 1,
+};
+ENUM_CLASS_FLAGS(EWebGPUTextureUsage)
+
+/** Built-in samplers for sampler bindings. */
+UENUM(BlueprintType)
+enum class EWebGPUSampler : uint8
+{
+	LinearClamp,
+	NearestClamp,
+	LinearRepeat,
+	NearestRepeat,
+};
+
 /** Where async results are delivered. */
 enum class EWebGPUCallbackThread : uint8
 {

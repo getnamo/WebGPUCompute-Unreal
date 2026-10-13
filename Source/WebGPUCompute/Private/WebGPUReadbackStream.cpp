@@ -3,6 +3,7 @@
 #include "WebGPUReadbackStream.h"
 #include "WebGPUBuffer.h"
 #include "WebGPUCompute.h"
+#include "WebGPUTexture.h"
 
 bool UWebGPUReadbackStream::Capture(UWebGPUBuffer* Buffer, int64 Offset, int64 Size)
 {
@@ -12,6 +13,16 @@ bool UWebGPUReadbackStream::Capture(UWebGPUBuffer* Buffer, int64 Offset, int64 S
 		return false;
 	}
 	return Native->Capture(Buffer->GetNative().ToSharedRef(), (uint64)FMath::Max<int64>(Offset, 0), Size < 0 ? WGPU_WHOLE_SIZE : (uint64)Size);
+}
+
+bool UWebGPUReadbackStream::CaptureTexture(UWebGPUTexture* Texture)
+{
+	if (!Native || !Texture || !Texture->GetNative())
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("ReadbackStream CaptureTexture: %s"), Native ? TEXT("no valid texture") : TEXT("the stream was released"));
+		return false;
+	}
+	return Native->CaptureTexture(Texture->GetNative().ToSharedRef());
 }
 
 bool UWebGPUReadbackStream::ReadFrame(TFunctionRef<void(const FWebGPUReadbackFrame& Frame)> Reader)
@@ -35,8 +46,7 @@ bool UWebGPUReadbackStream::ReadBytes(TArray<uint8>& OutBytes)
 {
 	return ReadFrame([&OutBytes](const FWebGPUReadbackFrame& Frame)
 	{
-		OutBytes.SetNumUninitialized((int32)Frame.GetSize());
-		FMemory::Memcpy(OutBytes.GetData(), Frame.GetData(), Frame.GetSize());
+		Frame.CopyTo(OutBytes);
 	});
 }
 
@@ -44,7 +54,10 @@ bool UWebGPUReadbackStream::ReadFloats(TArray<float>& OutValues)
 {
 	return ReadFrame([&OutValues](const FWebGPUReadbackFrame& Frame)
 	{
-		OutValues = TArray<float>(Frame.View<float>());
+		TArray<uint8> Bytes;
+		Frame.CopyTo(Bytes);
+		OutValues.SetNumUninitialized(Bytes.Num() / sizeof(float));
+		FMemory::Memcpy(OutValues.GetData(), Bytes.GetData(), OutValues.Num() * sizeof(float));
 	});
 }
 
@@ -52,7 +65,10 @@ bool UWebGPUReadbackStream::ReadInts(TArray<int32>& OutValues)
 {
 	return ReadFrame([&OutValues](const FWebGPUReadbackFrame& Frame)
 	{
-		OutValues = TArray<int32>(Frame.View<int32>());
+		TArray<uint8> Bytes;
+		Frame.CopyTo(Bytes);
+		OutValues.SetNumUninitialized(Bytes.Num() / sizeof(int32));
+		FMemory::Memcpy(OutValues.GetData(), Bytes.GetData(), OutValues.Num() * sizeof(int32));
 	});
 }
 

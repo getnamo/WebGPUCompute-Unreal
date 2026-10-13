@@ -160,6 +160,53 @@ namespace
 	}
 }
 
+namespace
+{
+	const TCHAR* ToDimension(tint::inspector::ResourceBinding::TextureDimension Dimension)
+	{
+		using EDim = tint::inspector::ResourceBinding::TextureDimension;
+		switch (Dimension)
+		{
+		case EDim::k1d: return TEXT("1d");
+		case EDim::k2d: return TEXT("2d");
+		case EDim::k2dArray: return TEXT("2d_array");
+		case EDim::k3d: return TEXT("3d");
+		case EDim::kCube: return TEXT("cube");
+		case EDim::kCubeArray: return TEXT("cube_array");
+		default: return TEXT("");
+		}
+	}
+
+	const TCHAR* ToTexelFormat(tint::inspector::ResourceBinding::TexelFormat Format)
+	{
+		// Same order as the Tint enum
+		static const TCHAR* Names[] = {
+			TEXT("r8snorm"), TEXT("r8uint"), TEXT("r8sint"), TEXT("rg8unorm"), TEXT("rg8snorm"), TEXT("rg8uint"), TEXT("rg8sint"),
+			TEXT("r16unorm"), TEXT("r16snorm"), TEXT("r16uint"), TEXT("r16sint"), TEXT("r16float"),
+			TEXT("rg16unorm"), TEXT("rg16snorm"), TEXT("rg16uint"), TEXT("rg16sint"), TEXT("rg16float"),
+			TEXT("bgra8unorm"), TEXT("rgba8unorm"), TEXT("rgba8snorm"), TEXT("rgba8uint"), TEXT("rgba8sint"),
+			TEXT("rgba16unorm"), TEXT("rgba16snorm"), TEXT("rgba16uint"), TEXT("rgba16sint"), TEXT("rgba16float"),
+			TEXT("r32uint"), TEXT("r32sint"), TEXT("r32float"), TEXT("rg32uint"), TEXT("rg32sint"), TEXT("rg32float"),
+			TEXT("rgba32uint"), TEXT("rgba32sint"), TEXT("rgba32float"), TEXT("r8unorm"),
+			TEXT("rgb10a2uint"), TEXT("rgb10a2unorm"), TEXT("rg11b10ufloat"),
+		};
+		const int32 Index = (int32)Format;
+		return Index >= 0 && Index < UE_ARRAY_COUNT(Names) ? Names[Index] : TEXT("");
+	}
+
+	const TCHAR* ToAccess(tint::inspector::ResourceBinding::ResourceType Type)
+	{
+		using EType = tint::inspector::ResourceBinding::ResourceType;
+		switch (Type)
+		{
+		case EType::kWriteOnlyStorageTexture: return TEXT("write");
+		case EType::kReadOnlyStorageTexture: return TEXT("read");
+		case EType::kReadWriteStorageTexture: return TEXT("read_write");
+		default: return TEXT("");
+		}
+	}
+}
+
 const FWebGPUTypeLayout::FField* FWebGPUTypeLayout::FindField(const FString& FieldName) const
 {
 	return Fields.FindByPredicate([&FieldName](const FField& Field) { return Field.Name == FieldName; });
@@ -272,6 +319,15 @@ bool FWebGPUShaderReflection::Reflect(const FString& Source, FWebGPUShaderReflec
 			Binding.Group = (int32)Resource.bind_group;
 			Binding.Binding = (int32)Resource.binding;
 			Binding.Type = ToBindingType(Resource.resource_type);
+			if (Binding.IsTexture())
+			{
+				Binding.TextureDimension = ToDimension(Resource.dim);
+				if (Binding.Type == EWebGPUBindingType::StorageTexture)
+				{
+					Binding.TexelFormat = ToTexelFormat(Resource.image_format);
+					Binding.Access = ToAccess(Resource.resource_type);
+				}
+			}
 			if (const TSharedPtr<const FWebGPUTypeLayout>* Layout = ResourceLayouts.Find(TPair<uint32, uint32>(Resource.bind_group, Resource.binding)))
 			{
 				Binding.Layout = *Layout;

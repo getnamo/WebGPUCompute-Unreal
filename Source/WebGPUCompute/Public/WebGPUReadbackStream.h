@@ -8,6 +8,7 @@
 #include "WebGPUReadbackStream.generated.h"
 
 class UWebGPUBuffer;
+class UWebGPUTexture;
 
 /** The frame a UWebGPUReadbackStream read last. */
 USTRUCT(BlueprintType)
@@ -49,6 +50,10 @@ public:
 	/** Copies a byte range of Buffer (Size < 0: to the end) into a free slot, after all earlier commands. False when dropped. */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU|Stream")
 	bool Capture(UWebGPUBuffer* Buffer, int64 Offset = 0, int64 Size = -1);
+
+	/** Copies a whole texture into a free slot, after all earlier commands. False when dropped. Reads return its pixels, rows tightly packed. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Stream")
+	bool CaptureTexture(UWebGPUTexture* Texture);
 
 	/** The next frame as bytes (Latest: the newest; Queue and Lockstep: the oldest unread). False when nothing new is ready. */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU|Stream")

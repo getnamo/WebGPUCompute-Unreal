@@ -130,6 +130,10 @@ FWebGPUReadbackFrame& FWebGPUReadbackFrame::operator=(FWebGPUReadbackFrame&& Oth
 		Data = Other.Data;
 		Size = Other.Size;
 		Sequence = Other.Sequence;
+		Width = Other.Width;
+		Height = Other.Height;
+		RowBytes = Other.RowBytes;
+		RowPitch = Other.RowPitch;
 		CaptureFrame = Other.CaptureFrame;
 		CaptureTime = Other.CaptureTime;
 		ReadyTime = Other.ReadyTime;
@@ -143,6 +147,27 @@ FWebGPUReadbackFrame& FWebGPUReadbackFrame::operator=(FWebGPUReadbackFrame&& Oth
 FWebGPUReadbackFrame::~FWebGPUReadbackFrame()
 {
 	Release();
+}
+
+void FWebGPUReadbackFrame::CopyTo(TArray<uint8>& OutBytes) const
+{
+	if (!Data)
+	{
+		OutBytes.Reset();
+		return;
+	}
+	if (RowPitch == 0)
+	{
+		OutBytes.SetNumUninitialized((int32)Size);
+		FMemory::Memcpy(OutBytes.GetData(), Data, Size);
+		return;
+	}
+	// Texture rows: drop the 256-byte alignment padding
+	OutBytes.SetNumUninitialized((int32)((uint64)RowBytes * Height));
+	for (uint32 Y = 0; Y < Height; Y++)
+	{
+		FMemory::Memcpy(OutBytes.GetData() + (uint64)Y * RowBytes, Data + (uint64)Y * RowPitch, RowBytes);
+	}
 }
 
 void FWebGPUReadbackFrame::Release()
@@ -197,50 +222,95 @@ bool FWebGPUReadbackStream::Capture(const TSharedRef<FWebGPUBuffer>& Source, uin
 		return false;
 	}
 
-	int32 SlotIndex = INDEX_NONE;
 	uint64 Sequence = 0;
+	const int32 SlotIndex = ReserveSlot(Size, 0, 0, 0, 0, Sequence);
+	if (SlotIndex == INDEX_NONE)
 	{
-		FScopeLock ScopeLock(&Lock);
-		SlotIndex = Slots.IndexOfByPredicate([](const FSlot& Slot) { return Slot.State == ESlot::Free; });
-		if (SlotIndex == INDEX_NONE && Policy == EWebGPUStreamPolicy::Latest)
-		{
-			// Recycle the oldest frame nobody read: newer data is on its way
-			uint64 Oldest = MAX_uint64;
-			for (int32 Index = 0; Index < Slots.Num(); Index++)
-			{
-				if (Slots[Index].State == ESlot::Ready && Slots[Index].Sequence < Oldest)
-				{
-					Oldest = Slots[Index].Sequence;
-					SlotIndex = Index;
-				}
-			}
-			if (SlotIndex != INDEX_NONE)
-			{
-				Stats.Skipped++;
-			}
-		}
-		if (SlotIndex == INDEX_NONE)
-		{
-			Stats.Dropped++;
-			return false;
-		}
-
-		FSlot& Slot = Slots[SlotIndex];
-		Slot.State = ESlot::Reserved;
-		Slot.Sequence = Sequence = ++NextSequence;
-		Slot.Size = Size;
-		Slot.CaptureFrame = GFrameCounter;
-		Slot.CaptureTime = FPlatformTime::Seconds();
-		Slot.ReadyTime = 0.0;
-		Slot.Mapped = nullptr;
+		return false;
 	}
-
 	FWebGPUContext* CtxPtr = Ctx.Get();
-	Ctx->Enqueue([CtxPtr, Self = AsShared(), SlotIndex, Sequence, Source, Offset, Size]()
+	return FinishCapture(*Ctx, SlotIndex, Sequence, [CtxPtr, Self = AsShared(), SlotIndex, Sequence, Source, Offset, Size]()
 	{
 		Self->CaptureOnWorker(*CtxPtr, SlotIndex, Sequence, *Source, Offset, Size);
 	});
+}
 
+bool FWebGPUReadbackStream::CaptureTexture(const TSharedRef<FWebGPUTexture>& Source)
+{
+	TSharedPtr<FWebGPUContext> Ctx = Context.Pin();
+	if (!Ctx)
+	{
+		return false;
+	}
+	check(!Ctx->IsInWorkerThread());
+
+	const uint32 RowPitch = Source->GetCopyBytesPerRow();
+	const uint64 Size = (uint64)RowPitch * Source->GetHeight();
+	if (Size > SlotBytes)
+	{
+		UE_LOG(LogWebGPU, Error, TEXT("Readback stream '%s': texture '%s' (%ux%u) needs %llu-byte slots (rows are 256-byte aligned), these are %llu"),
+			*Label, *Source->GetLabel(), Source->GetWidth(), Source->GetHeight(), Size, SlotBytes);
+		return false;
+	}
+
+	uint64 Sequence = 0;
+	const int32 SlotIndex = ReserveSlot(Size, Source->GetWidth(), Source->GetHeight(), Source->GetWidth() * Source->GetBytesPerPixel(), RowPitch, Sequence);
+	if (SlotIndex == INDEX_NONE)
+	{
+		return false;
+	}
+	FWebGPUContext* CtxPtr = Ctx.Get();
+	return FinishCapture(*Ctx, SlotIndex, Sequence, [CtxPtr, Self = AsShared(), SlotIndex, Sequence, Source]()
+	{
+		Self->CaptureTextureOnWorker(*CtxPtr, SlotIndex, Sequence, *Source);
+	});
+}
+
+int32 FWebGPUReadbackStream::ReserveSlot(uint64 Size, uint32 Width, uint32 Height, uint32 RowBytes, uint32 RowPitch, uint64& OutSequence)
+{
+	FScopeLock ScopeLock(&Lock);
+	int32 SlotIndex = Slots.IndexOfByPredicate([](const FSlot& Slot) { return Slot.State == ESlot::Free; });
+	if (SlotIndex == INDEX_NONE && Policy == EWebGPUStreamPolicy::Latest)
+	{
+		// Recycle the oldest frame nobody read: newer data is on its way
+		uint64 Oldest = MAX_uint64;
+		for (int32 Index = 0; Index < Slots.Num(); Index++)
+		{
+			if (Slots[Index].State == ESlot::Ready && Slots[Index].Sequence < Oldest)
+			{
+				Oldest = Slots[Index].Sequence;
+				SlotIndex = Index;
+			}
+		}
+		if (SlotIndex != INDEX_NONE)
+		{
+			Stats.Skipped++;
+		}
+	}
+	if (SlotIndex == INDEX_NONE)
+	{
+		Stats.Dropped++;
+		return INDEX_NONE;
+	}
+
+	FSlot& Slot = Slots[SlotIndex];
+	Slot.State = ESlot::Reserved;
+	Slot.Sequence = OutSequence = ++NextSequence;
+	Slot.Size = Size;
+	Slot.Width = Width;
+	Slot.Height = Height;
+	Slot.RowBytes = RowBytes;
+	Slot.RowPitch = RowPitch;
+	Slot.CaptureFrame = GFrameCounter;
+	Slot.CaptureTime = FPlatformTime::Seconds();
+	Slot.ReadyTime = 0.0;
+	Slot.Mapped = nullptr;
+	return SlotIndex;
+}
+
+bool FWebGPUReadbackStream::FinishCapture(FWebGPUContext& Ctx, int32 SlotIndex, uint64 Sequence, TUniqueFunction<void()>&& Command)
+{
+	Ctx.Enqueue(MoveTemp(Command));
 	if (Policy == EWebGPUStreamPolicy::Lockstep)
 	{
 		return WaitForSequence(SlotIndex, Sequence, LockstepTimeoutSeconds);
@@ -335,6 +405,10 @@ bool FWebGPUReadbackStream::Acquire(FWebGPUReadbackFrame& OutFrame)
 	OutFrame.CaptureFrame = Slot.CaptureFrame;
 	OutFrame.CaptureTime = Slot.CaptureTime;
 	OutFrame.ReadyTime = Slot.ReadyTime;
+	OutFrame.Width = Slot.Width;
+	OutFrame.Height = Slot.Height;
+	OutFrame.RowBytes = Slot.RowBytes;
+	OutFrame.RowPitch = Slot.RowPitch;
 	return true;
 }
 
@@ -425,20 +499,20 @@ void FWebGPUReadbackStream::ReleaseSlot(int32 SlotIndex, uint64 Sequence)
 	}
 }
 
-void FWebGPUReadbackStream::CaptureOnWorker(FWebGPUContext& Ctx, int32 SlotIndex, uint64 Sequence, FWebGPUBuffer& Source, uint64 Offset, uint64 Size)
+WGPUBuffer FWebGPUReadbackStream::PrepareSlot(FWebGPUContext& Ctx, int32 SlotIndex, uint64 Sequence)
 {
 	FSlot& Slot = Slots[SlotIndex];
 	{
 		FScopeLock ScopeLock(&Lock);
 		if (Slot.Sequence != Sequence || Slot.State != ESlot::Reserved)
 		{
-			return;
+			return nullptr;
 		}
 	}
-	if (!Ctx.HasDevice() || !Source.GetHandle())
+	if (!Ctx.HasDevice())
 	{
 		FailSlot(SlotIndex, Sequence);
-		return;
+		return nullptr;
 	}
 
 	// A buffer of the current device, not mapped (it may still hold an older frame)
@@ -456,7 +530,7 @@ void FWebGPUReadbackStream::CaptureOnWorker(FWebGPUContext& Ctx, int32 SlotIndex
 		if (!Slot.Buffer)
 		{
 			FailSlot(SlotIndex, Sequence);
-			return;
+			return nullptr;
 		}
 	}
 	else if (Slot.bMapped)
@@ -464,18 +538,21 @@ void FWebGPUReadbackStream::CaptureOnWorker(FWebGPUContext& Ctx, int32 SlotIndex
 		wgpuBufferUnmap(Slot.Buffer);
 		Slot.bMapped = false;
 	}
+	return Slot.Buffer;
+}
 
-	wgpuCommandEncoderCopyBufferToBuffer(Ctx.GetEncoder(), Source.GetHandle(), Offset, Slot.Buffer, 0, Size);
+void FWebGPUReadbackStream::SubmitSlot(FWebGPUContext& Ctx, int32 SlotIndex, uint64 Sequence, uint64 Size)
+{
 	{
 		FScopeLock ScopeLock(&Lock);
-		Slot.State = ESlot::Pending;
+		Slots[SlotIndex].State = ESlot::Pending;
 		Stats.Committed++;
 	}
 	Ctx.StatReadbacks++;
 
 	FWebGPUContext* CtxPtr = &Ctx;
 	const uint32 Generation = Ctx.DeviceGeneration;
-	WGPUBuffer Buffer = Slot.Buffer;
+	WGPUBuffer Buffer = Slots[SlotIndex].Buffer;
 	Ctx.AfterSubmit([Self = AsShared(), CtxPtr, SlotIndex, Sequence, Generation, Buffer, Size](bool bSubmitted)
 	{
 		if (!bSubmitted)
@@ -488,6 +565,47 @@ void FWebGPUReadbackStream::CaptureOnWorker(FWebGPUContext& Ctx, int32 SlotIndex
 			Self->FinishMap(*CtxPtr, SlotIndex, Sequence, Generation, bSuccess);
 		});
 	});
+}
+
+void FWebGPUReadbackStream::CaptureOnWorker(FWebGPUContext& Ctx, int32 SlotIndex, uint64 Sequence, FWebGPUBuffer& Source, uint64 Offset, uint64 Size)
+{
+	if (!Source.GetHandle())
+	{
+		FailSlot(SlotIndex, Sequence);
+		return;
+	}
+	WGPUBuffer Buffer = PrepareSlot(Ctx, SlotIndex, Sequence);
+	if (!Buffer)
+	{
+		return;
+	}
+	wgpuCommandEncoderCopyBufferToBuffer(Ctx.GetEncoder(), Source.GetHandle(), Offset, Buffer, 0, Size);
+	SubmitSlot(Ctx, SlotIndex, Sequence, Size);
+}
+
+void FWebGPUReadbackStream::CaptureTextureOnWorker(FWebGPUContext& Ctx, int32 SlotIndex, uint64 Sequence, FWebGPUTexture& Source)
+{
+	if (!Ctx.CanUseTexture(Source, TEXT("CaptureTexture")))
+	{
+		FailSlot(SlotIndex, Sequence);
+		return;
+	}
+	WGPUBuffer Buffer = PrepareSlot(Ctx, SlotIndex, Sequence);
+	if (!Buffer)
+	{
+		return;
+	}
+
+	WGPUTexelCopyTextureInfo From = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+	From.texture = Source.GetHandle();
+	WGPUTexelCopyBufferInfo To = {};
+	To.layout = WGPU_TEXEL_COPY_BUFFER_LAYOUT_INIT;
+	To.layout.bytesPerRow = Source.GetCopyBytesPerRow();
+	To.layout.rowsPerImage = Source.GetHeight();
+	To.buffer = Buffer;
+	const WGPUExtent3D Extent = { Source.GetWidth(), Source.GetHeight(), 1 };
+	wgpuCommandEncoderCopyTextureToBuffer(Ctx.GetEncoder(), &From, &To, &Extent);
+	SubmitSlot(Ctx, SlotIndex, Sequence, (uint64)Source.GetCopyBytesPerRow() * Source.GetHeight());
 }
 
 void FWebGPUReadbackStream::FinishMap(FWebGPUContext& Ctx, int32 SlotIndex, uint64 Sequence, uint32 Generation, bool bSuccess)

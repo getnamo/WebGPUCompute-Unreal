@@ -2,7 +2,7 @@
 
 Leverages [Dawn](https://dawn.googlesource.com/dawn) (Google's WebGPU implementation) to run WGSL shaders in unreal for compute purposes. Experimental plugin meant to explore more dynamic runtime compute shader code. YMMV.
 
-On the D3D12 RHI, render targets can be shared with WebGPU without copies (`FWebGPUSharedTexture`), synchronized with GPU fences.
+On the D3D12 RHI, render targets can be shared with WebGPU without copies, synchronized with GPU fences (see Textures).
 
 ## Setup
 
@@ -82,6 +82,22 @@ if (Results->Acquire(Frame))                 // usually the previous tick's resu
 ```
 
 Blueprint: **Create WebGPU Readback Stream (For Buffer)**, **Capture**, **Read Bytes / Floats / Ints / Structs** (wildcard array), **Get Last Frame Info**; **Create WebGPU Struct Mirror**, **Set Element / Get Element** (wildcard struct), **Set Elements**, **Sync**, **Get Buffer**.
+
+### Textures
+
+`CreateTexture(Width, Height, Format, Usage)` makes a 2D texture. Bind it by WGSL name with `SetTextureByName` (`texture_2d` or `texture_storage_2d`) and choose built-in samplers with `SetSamplerByName`; sampler bindings left unset use linear clamp. `WriteTexture` and `ReadTexture` take tightly packed rows, and readback streams can `CaptureTexture`. Texture bindings are checked against the shader (2D only, storage format, usage). Anything WebGPU itself rejects, such as sampling an unfilterable format, skips that kernel with WebGPU's message rather than failing the batch.
+
+On the D3D12 RHI, UE render targets can be shared without copies: `ImportTexture(FRHITexture*)` in C++, or **Create WebGPU Texture From Render Target** in Blueprint. The render target needs **Shared** enabled, plus **Can Create UAV** for kernels that write it. Use a shared texture between `BeginTextureAccess` and `EndTextureAccess`, called on the game thread:
+
+```cpp
+Context->BeginTextureAccess(Camera);   // WebGPU sees UE's rendering enqueued so far
+Context->DispatchForCount(Detect, Width, Height);
+Context->EndTextureAccess(Camera);     // UE rendering enqueued after this sees WebGPU's results
+```
+
+Synchronization uses GPU fences, so neither the game thread nor the render thread waits. Shared textures are imported again after a device loss. (`FWebGPUSharedTexture` is the lower-level, render-thread version of the same sharing, for direct Dawn use.)
+
+Blueprint: **Create WebGPU Texture**, **Create WebGPU Texture From Render Target**, the texture's **Begin Access / End Access / Write Bytes / Write Floats**, the kernel's **Set Texture By Name / Set Sampler By Name**, and **Create WebGPU Readback Stream For Texture** + **Capture Texture**.
 
 See https://github.com/getnamo/WebGPUCompute-Unreal/issues/1 for tracking on initial usable build.
 

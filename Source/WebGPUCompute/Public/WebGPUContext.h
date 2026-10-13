@@ -13,7 +13,9 @@
 #include <atomic>
 
 class FWebGPUContext;
+class FRHITexture;
 class FWebGPUReadbackStream;
+struct FWebGPUSharedTextureState;
 class FWebGPUUploadStream;
 enum class EWebGPUStreamPolicy : uint8;
 
@@ -55,6 +57,56 @@ private:
 };
 
 /**
+ * A 2D texture owned by an FWebGPUContext (CreateTexture), or a UE RHI texture shared without copies
+ * (ImportTexture, D3D12). Its WebGPU handle is only touched on the worker; after a device loss it is
+ * recreated (zeroed) or imported again.
+ */
+class WEBGPUCOMPUTE_API FWebGPUTexture
+{
+public:
+	~FWebGPUTexture();
+
+	uint32 GetWidth() const { return Width; }
+	uint32 GetHeight() const { return Height; }
+	EWebGPUTextureFormat GetFormat() const { return Format; }
+	EWebGPUTextureUsage GetUsage() const { return Usage; }
+	const FString& GetLabel() const { return Label; }
+	TSharedPtr<FWebGPUContext> GetContext() const;
+
+	/** A shared UE texture: use it between FWebGPUContext::BeginTextureAccess and EndTextureAccess. */
+	bool IsShared() const { return Shared.IsValid(); }
+
+	uint32 GetBytesPerPixel() const { return BytesPerPixel(Format); }
+	/** Bytes per row of texture <-> buffer copies (rows are 256-byte aligned there). */
+	uint32 GetCopyBytesPerRow() const { return Align(Width * GetBytesPerPixel(), 256u); }
+
+	static uint32 BytesPerPixel(EWebGPUTextureFormat Format);
+	/** The WGSL storage format spelling, e.g. "rgba16float". */
+	static const TCHAR* WgslFormat(EWebGPUTextureFormat Format);
+	static WGPUTextureFormat ToWGPU(EWebGPUTextureFormat Format);
+
+	/** Worker thread only. */
+	WGPUTexture GetHandle() const { return Handle; }
+	WGPUTextureView GetView() const { return View; }
+
+private:
+	friend class FWebGPUContext;
+
+	TWeakPtr<FWebGPUContext> Context;
+	uint32 Width = 0;
+	uint32 Height = 0;
+	EWebGPUTextureFormat Format = EWebGPUTextureFormat::RGBA8Unorm;
+	EWebGPUTextureUsage Usage = EWebGPUTextureUsage::Storage | EWebGPUTextureUsage::Sampled;
+	FString Label;
+	TSharedPtr<FWebGPUSharedTextureState> Shared;
+
+	// Worker thread only
+	WGPUTexture Handle = nullptr;
+	WGPUTextureView View = nullptr;
+	bool bAccessing = false;
+};
+
+/**
  * A compute pipeline plus its bindings. Create it with FWebGPUContext::CreateKernel.
  * Compiles asynchronously; a recompile keeps the last good pipeline until the new one succeeds.
  */
@@ -91,11 +143,14 @@ public:
 private:
 	friend class FWebGPUContext;
 
+	/** One resource: a buffer range, a texture, or a built-in sampler. */
 	struct FBinding
 	{
 		TSharedPtr<FWebGPUBuffer> Buffer;
 		uint64 Offset = 0;
 		uint64 Size = WGPU_WHOLE_SIZE;
+		TSharedPtr<FWebGPUTexture> Texture;
+		TOptional<EWebGPUSampler> Sampler;
 	};
 
 	TWeakPtr<FWebGPUContext> Context;
@@ -128,6 +183,8 @@ private:
 	TSortedMap<uint32, WGPUBindGroup> BindGroups;
 	bool bBindGroupsDirty = true;
 	bool bBindingsValid = false;
+	/** Shared textures in the current bind groups: each dispatch checks they are being accessed. */
+	TArray<TWeakPtr<FWebGPUTexture>> SharedTextures;
 	TSet<FString> Warned;
 
 	void SetMessages(const TArray<FWebGPUCompileMessage>& InMessages);
@@ -186,6 +243,17 @@ public:
 	void RecompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, const FString& Source,
 		FWebGPUCompileCallback OnCompiled = nullptr, EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
 
+	/** A 2D texture (zeroed). Storage use needs a WGSL storage format (see EWebGPUTextureFormat). */
+	TSharedRef<FWebGPUTexture> CreateTexture(uint32 Width, uint32 Height, EWebGPUTextureFormat Format,
+		EWebGPUTextureUsage Usage = EWebGPUTextureUsage::Storage | EWebGPUTextureUsage::Sampled, const FString& Label = FString());
+
+	/**
+	 * Shares a UE RHI texture with WebGPU without copies: D3D12 RHI, texture created with
+	 * ETextureCreateFlags::Shared (plus UAV for storage use; bGPUSharedFlag / bCanCreateUAV on render targets).
+	 * Game thread. Null, with OutError, when it can't be shared. Re-imported automatically after a device loss.
+	 */
+	TSharedPtr<FWebGPUTexture> ImportTexture(FRHITexture* Texture, FString& OutError, const FString& Label = FString());
+
 	// Commands (any thread, executed in order)
 
 	/** Offset and size must be multiples of 4. The data is copied. */
@@ -211,6 +279,31 @@ public:
 
 	/** Dispatches enough workgroups to cover X*Y*Z invocations, using the entry point's @workgroup_size. */
 	void DispatchForCount(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X, uint32 Y = 1, uint32 Z = 1);
+
+	/** Binds a texture (texture_2d or texture_storage_2d) to @group(Group) @binding(Binding). Null unbinds. */
+	void SetTexture(const TSharedRef<FWebGPUKernel>& Kernel, uint32 Group, uint32 Binding, const TSharedPtr<FWebGPUTexture>& Texture);
+
+	/** Binds a texture by WGSL variable name. Null unbinds. */
+	void SetTextureByName(const TSharedRef<FWebGPUKernel>& Kernel, const FString& Name, const TSharedPtr<FWebGPUTexture>& Texture);
+
+	/** Picks the built-in sampler for a sampler binding. Sampler bindings left unset use LinearClamp. */
+	void SetSamplerByName(const TSharedRef<FWebGPUKernel>& Kernel, const FString& Name, EWebGPUSampler Sampler);
+
+	/** Rows tightly packed (Width * bytes per pixel each). The data is copied. */
+	void WriteTexture(const TSharedRef<FWebGPUTexture>& Texture, const void* Pixels, uint64 Size);
+	void WriteTexture(const TSharedRef<FWebGPUTexture>& Texture, TArray<uint8>&& Pixels);
+
+	/** Reads the whole texture back after all earlier commands, rows tightly packed. */
+	void ReadTexture(const TSharedRef<FWebGPUTexture>& Texture, FWebGPUReadCallback&& Callback,
+		EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
+
+	/**
+	 * Shared textures (no-op for others), game thread. Commands enqueued between Begin and End may use the
+	 * texture: WebGPU sees UE rendering enqueued before Begin, and UE rendering enqueued after End sees
+	 * WebGPU's results. The synchronization is GPU-side fences; neither the game nor the render thread waits.
+	 */
+	void BeginTextureAccess(const TSharedRef<FWebGPUTexture>& Texture);
+	void EndTextureAccess(const TSharedRef<FWebGPUTexture>& Texture);
 
 	/** Measures each dispatch of this kernel with GPU timestamps (needs the TimestampQuery feature). */
 	void SetProfiling(const TSharedRef<FWebGPUKernel>& Kernel, bool bEnabled);
@@ -290,6 +383,7 @@ public:
 
 private:
 	friend class FWebGPUBuffer;
+	friend class FWebGPUTexture;
 	friend class FWebGPUReadbackStream;
 	friend class FWebGPUUploadStream;
 
@@ -301,6 +395,11 @@ private:
 
 	// Worker thread
 	void CreateBufferHandle(FWebGPUBuffer& Buffer);
+	void CreateTextureHandle(FWebGPUTexture& Texture);
+	void ReleaseTextureHandle(FWebGPUTexture& Texture);
+	bool CanUseTexture(FWebGPUTexture& Texture, const TCHAR* What);
+	void WriteTextureOnWorker(FWebGPUTexture& Texture, const uint8* Pixels, uint64 Size);
+	void ReadTextureOnWorker(FWebGPUTexture& Texture, FWebGPUReadCallback&& Callback, EWebGPUCallbackThread CallbackThread);
 	void CompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, FWebGPUCompileCallback OnCompiled, EWebGPUCallbackThread CallbackThread);
 	void FinishCompile(FWebGPUKernel& Kernel, bool bSuccess, const TArray<FWebGPUCompileMessage>& Messages, FWebGPUCompileCallback&& OnCompiled, EWebGPUCallbackThread CallbackThread);
 	void EncodeDispatch(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X, uint32 Y, uint32 Z);
@@ -318,8 +417,16 @@ private:
 	WGPUBuffer CreateMappableBuffer(WGPUBufferUsage Usage, uint64 Size, bool bMappedAtCreation, const char* Label);
 	WGPUBuffer AcquireStaging(uint64 Size, uint64& OutCapacity);
 	void ReleaseStaging(WGPUBuffer Staging, uint64 Capacity, uint32 Generation);
-	struct FUploadPage;
-	FUploadPage* AllocateUpload(uint64 Size, uint64& OutOffset);
+	/** Upload memory for writes: mapped for writing, unmapped for the submit that copies from it, then remapped. */
+	struct FUploadPage
+	{
+		WGPUBuffer Buffer = nullptr;
+		uint64 Capacity = 0;
+		uint64 Used = 0;
+		uint8* Mapped = nullptr;
+		uint32 Generation = 0;
+	};
+	FUploadPage* AllocateUpload(uint64 Size, uint64& OutOffset, uint64 Alignment = 4);
 	void RecycleUploadPage(FUploadPage* Page);
 	void DeleteUploadPage(FUploadPage* Page);
 	void CreateDeviceObjects();
@@ -373,6 +480,8 @@ private:
 	TMap<uint64, TArray<WGPUBuffer>> StagingPool;
 	TArray<TWeakPtr<FWebGPUBuffer>> LiveBuffers;
 	TArray<TWeakPtr<FWebGPUKernel>> LiveKernels;
+	TArray<TWeakPtr<FWebGPUTexture>> LiveTextures;
+	WGPUSampler Samplers[4] = {};
 	TArray<TWeakPtr<FWebGPUReadbackStream>> LiveReadbackStreams;
 	TArray<TWeakPtr<FWebGPUUploadStream>> LiveUploadStreams;
 	/** Lost devices kept alive (not destroyed) while the game still holds memory they mapped. */

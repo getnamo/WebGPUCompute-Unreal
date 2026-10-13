@@ -8,6 +8,7 @@
 #include "WebGPUKernel.generated.h"
 
 class UWebGPUBuffer;
+class UWebGPUTexture;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FWebGPUKernelCompiledSignature, bool, bSuccess, const FString&, Messages);
 
@@ -32,6 +33,14 @@ public:
 	/** Binds by WGSL variable name (e.g. "agents"); follows the binding if a shader edit moves it. None unbinds. */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
 	void SetBufferByName(const FString& Name, UWebGPUBuffer* Buffer);
+
+	/** Binds a texture (texture_2d or texture_storage_2d) by WGSL variable name. None unbinds. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	void SetTextureByName(const FString& Name, UWebGPUTexture* Texture);
+
+	/** Picks the built-in sampler for a sampler binding (unset samplers use Linear Clamp). */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	void SetSamplerByName(const FString& Name, EWebGPUSampler Sampler);
 
 	/** Dispatches enough workgroups to cover X*Y*Z invocations, using the shader's @workgroup_size. */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")

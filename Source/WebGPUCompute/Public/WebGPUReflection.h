@@ -93,10 +93,23 @@ struct WEBGPUCOMPUTE_API FWebGPUBindingInfo
 	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
 	FString TypeName;
 
+	/** Textures: "1d", "2d", "2d_array", "3d", "cube" or "cube_array". */
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
+	FString TextureDimension;
+
+	/** Storage textures: the WGSL texel format, e.g. "rgba16float". */
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
+	FString TexelFormat;
+
+	/** Storage textures: "write", "read" or "read_write". */
+	UPROPERTY(BlueprintReadOnly, Category = "WebGPU")
+	FString Access;
+
 	/** Buffers: the full layout of the store type. */
 	TSharedPtr<const FWebGPUTypeLayout> Layout;
 
 	bool IsBuffer() const { return Type == EWebGPUBindingType::UniformBuffer || Type == EWebGPUBindingType::StorageBuffer || Type == EWebGPUBindingType::ReadOnlyStorageBuffer; }
+	bool IsTexture() const { return Type == EWebGPUBindingType::SampledTexture || Type == EWebGPUBindingType::StorageTexture; }
 
 	/** Runtime-sized arrays: the element layout (also for a struct whose last member is the runtime array). */
 	TSharedPtr<const FWebGPUTypeLayout> GetRuntimeArrayElement() const;

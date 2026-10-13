@@ -14,6 +14,8 @@ class UWebGPUBuffer;
 class UWebGPUKernel;
 class UWebGPUReadbackStream;
 class UWebGPUStructMirror;
+class UWebGPUTexture;
+class UTextureRenderTarget2D;
 
 UCLASS()
 class WEBGPUCOMPUTE_API UWebGPUBlueprintLibrary : public UBlueprintFunctionLibrary
@@ -68,6 +70,24 @@ public:
 	UFUNCTION(BlueprintCallable, CustomThunk, Category = "WebGPU|Structs", meta = (ArrayParm = "OutItems"))
 	static bool WebGPUBytesToStructArray(const TArray<uint8>& Bytes, TArray<int32>& OutItems);
 	DECLARE_FUNCTION(execWebGPUBytesToStructArray);
+
+	/** A 2D texture for kernels (zeroed). Storage use needs a WGSL storage format (RGBA8Unorm, RGBA16Float, RGBA32Float, R32Float, ...). */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Texture")
+	static UWebGPUTexture* CreateWebGPUTexture(int32 Width, int32 Height, EWebGPUTextureFormat Format = EWebGPUTextureFormat::RGBA8Unorm,
+		UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/WebGPUCompute.EWebGPUTextureUsage")) int32 Usage = 3,
+		const FString& Label = TEXT(""));
+
+	/**
+	 * Shares a render target with kernels without copies (D3D12 RHI). The render target needs Shared
+	 * (bGPUSharedFlag) set, plus Can Create UAV for kernels that write it. Use the texture between its
+	 * Begin Access and End Access. Null (with a warning) when it can't be shared.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Texture")
+	static UWebGPUTexture* CreateWebGPUTextureFromRenderTarget(UTextureRenderTarget2D* RenderTarget, const FString& Label = TEXT(""));
+
+	/** A readback stream whose slots hold a whole texture (rows are 256-byte aligned in the slots). */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Stream")
+	static UWebGPUReadbackStream* CreateWebGPUReadbackStreamForTexture(UWebGPUTexture* Texture, int32 Slots = 3, EWebGPUStreamPolicy Policy = EWebGPUStreamPolicy::Latest, const FString& Label = TEXT(""));
 
 	/** Per-frame results from the GPU: a ring of Slots readback slots of SlotBytes each (see EWebGPUStreamPolicy). */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU|Stream")

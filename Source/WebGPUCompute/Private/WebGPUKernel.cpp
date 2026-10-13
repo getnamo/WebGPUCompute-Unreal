@@ -3,6 +3,7 @@
 #include "WebGPUKernel.h"
 #include "WebGPUBuffer.h"
 #include "WebGPUCompute.h"
+#include "WebGPUTexture.h"
 
 TSharedPtr<FWebGPUContext> UWebGPUKernel::GetContext() const
 {
@@ -34,6 +35,22 @@ void UWebGPUKernel::SetBufferByName(const FString& Name, UWebGPUBuffer* Buffer)
 	if (TSharedPtr<FWebGPUContext> Context = GetContext())
 	{
 		Context->SetBufferByName(Native.ToSharedRef(), Name, Buffer ? Buffer->GetNative() : nullptr);
+	}
+}
+
+void UWebGPUKernel::SetTextureByName(const FString& Name, UWebGPUTexture* Texture)
+{
+	if (TSharedPtr<FWebGPUContext> Context = GetContext())
+	{
+		Context->SetTextureByName(Native.ToSharedRef(), Name, Texture ? Texture->GetNative() : nullptr);
+	}
+}
+
+void UWebGPUKernel::SetSamplerByName(const FString& Name, EWebGPUSampler Sampler)
+{
+	if (TSharedPtr<FWebGPUContext> Context = GetContext())
+	{
+		Context->SetSamplerByName(Native.ToSharedRef(), Name, Sampler);
 	}
 }
 

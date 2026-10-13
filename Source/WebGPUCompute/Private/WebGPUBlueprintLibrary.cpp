@@ -8,6 +8,10 @@
 #include "WebGPUReadbackStream.h"
 #include "WebGPUStructMirror.h"
 #include "WebGPUSubsystem.h"
+#include "WebGPUTexture.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "RenderingThread.h"
+#include "TextureResource.h"
 
 UWebGPUBuffer* UWebGPUBlueprintLibrary::CreateWebGPUBuffer(int64 Size, int32 Usage, const FString& Label)
 {
@@ -95,6 +99,63 @@ UWebGPUBuffer* UWebGPUBlueprintLibrary::CreateWebGPUStructBuffer(UScriptStruct* 
 	UWebGPUBuffer* Buffer = NewObject<UWebGPUBuffer>();
 	Buffer->Initialize(Native.ToSharedRef());
 	return Buffer;
+}
+
+UWebGPUTexture* UWebGPUBlueprintLibrary::CreateWebGPUTexture(int32 Width, int32 Height, EWebGPUTextureFormat Format, int32 Usage, const FString& Label)
+{
+	TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
+	if (!Context || Width <= 0 || Height <= 0)
+	{
+		return nullptr;
+	}
+	const EWebGPUTextureUsage TextureUsage = Usage == 0 ? EWebGPUTextureUsage::Storage | EWebGPUTextureUsage::Sampled : (EWebGPUTextureUsage)Usage;
+	UWebGPUTexture* Texture = NewObject<UWebGPUTexture>();
+	Texture->Initialize(Context->CreateTexture((uint32)Width, (uint32)Height, Format, TextureUsage, Label));
+	return Texture;
+}
+
+UWebGPUTexture* UWebGPUBlueprintLibrary::CreateWebGPUTextureFromRenderTarget(UTextureRenderTarget2D* RenderTarget, const FString& Label)
+{
+	TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
+	if (!Context || !RenderTarget)
+	{
+		return nullptr;
+	}
+	if (!RenderTarget->bGPUSharedFlag)
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("CreateWebGPUTextureFromRenderTarget(%s): enable Shared (bGPUSharedFlag) on the render target"), *RenderTarget->GetName());
+		return nullptr;
+	}
+
+	// The RHI texture is created on the render thread
+	FTextureRenderTargetResource* Resource = RenderTarget->GameThread_GetRenderTargetResource();
+	if (!Resource || !Resource->GetRenderTargetTexture())
+	{
+		FlushRenderingCommands();
+		Resource = RenderTarget->GameThread_GetRenderTargetResource();
+	}
+	FString Error;
+	TSharedPtr<FWebGPUTexture> Native = Context->ImportTexture(Resource ? Resource->GetRenderTargetTexture() : nullptr, Error, Label.IsEmpty() ? RenderTarget->GetName() : Label);
+	if (!Native)
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("CreateWebGPUTextureFromRenderTarget(%s): %s"), *RenderTarget->GetName(), *Error);
+		return nullptr;
+	}
+	UWebGPUTexture* Texture = NewObject<UWebGPUTexture>();
+	Texture->Initialize(Native.ToSharedRef());
+	return Texture;
+}
+
+UWebGPUReadbackStream* UWebGPUBlueprintLibrary::CreateWebGPUReadbackStreamForTexture(UWebGPUTexture* Texture, int32 Slots, EWebGPUStreamPolicy Policy, const FString& Label)
+{
+	if (!Texture || !Texture->GetNative())
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("CreateWebGPUReadbackStreamForTexture: no valid texture"));
+		return nullptr;
+	}
+	const TSharedPtr<FWebGPUTexture>& Native = Texture->GetNative();
+	return CreateWebGPUReadbackStream((int64)Native->GetCopyBytesPerRow() * Native->GetHeight(), Slots, Policy,
+		Label.IsEmpty() ? Native->GetLabel() + TEXT(" readback") : Label);
 }
 
 UWebGPUReadbackStream* UWebGPUBlueprintLibrary::CreateWebGPUReadbackStream(int64 SlotBytes, int32 Slots, EWebGPUStreamPolicy Policy, const FString& Label)
