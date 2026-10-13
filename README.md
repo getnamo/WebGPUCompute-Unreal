@@ -172,6 +172,4 @@ Context.OnEndPlay = () => scope.release();           // free it all on reload / 
 
 **Example:** map **ArmyExampleJs** runs the same army from `Content/Scripts/examples/webgpu/army.js`. The script owns the resources, dispatches every frame, and reads per-team numbers back from the GPU (`army_stats.wgsl`) to show them. Save the script and it runs again (a file watcher calls the instance component's `Reload()`); its scope frees the old run's GPU objects first. Save a `.wgsl` file and only the kernels reload. The Blueprint and map come from `Tools/Examples/army_js_example.json`.
 
-See https://github.com/getnamo/WebGPUCompute-Unreal/issues/1 for tracking on initial usable build.
-
 [Discord Server](https://discord.gg/qfJUyxaW4s)
