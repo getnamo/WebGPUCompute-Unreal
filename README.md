@@ -34,6 +34,26 @@ Context->ReadBuffer(Data, 0, Count * sizeof(float), [](bool bSuccess, TArray<uin
 
 If the GPU device is lost (driver reset, TDR), the runtime recreates it along with every buffer (zeroed) and kernel, then fires `OnDeviceRecovered` so you can re-upload data. Per-kernel GPU timing is available with `SetProfiling`.
 
+### Bindings and structs
+
+Kernels are reflected with Tint (Dawn's WGSL compiler), so buffers can be bound by WGSL variable name (`SetBufferByName`) and `DispatchForCount` sizes the dispatch from `@workgroup_size`. Before each dispatch the bindings are checked against the shader: a missing, too small or wrongly-created buffer skips that dispatch with a warning that says what's wrong, and bindings the shader doesn't use are ignored.
+
+Arrays of UStructs map onto WGSL structs. The layout follows WGSL's alignment rules (a `FVector3f` takes 16 bytes unless a 4-byte member follows it); when it matches the UE memory layout, packing is a single memcpy, otherwise members are converted (`double` vectors to `f32`, `bool` to `u32`, small ints and enums widened). Pass the structs when creating a kernel and they are declared in WGSL ahead of your source:
+
+```cpp
+FWebGPUKernelDesc Desc;
+Desc.Source = TEXT("@group(0) @binding(0) var<storage, read_write> agents: array<AgentState>; ...");
+Desc.Structs = { FAgentState::StaticStruct() };
+TSharedRef<FWebGPUKernel> Kernel = Context->CreateKernel(Desc);
+TSharedPtr<FWebGPUBuffer> Agents = Context->CreateStructBuffer(FAgentState::StaticStruct(), Count);
+Context->WriteStructArray(Agents.ToSharedRef(), AgentArray);
+Context->SetBufferByName(Kernel, TEXT("agents"), Agents);
+Context->DispatchForCount(Kernel, Count);
+Context->ReadStructArray<FAgentState>(Agents.ToSharedRef(), 0, Count, [](bool bSuccess, TArray<FAgentState>&& Result) { });
+```
+
+Blueprint has the same through **Create WebGPU Struct Buffer**, **Create WebGPU Kernel With Structs**, **Write WebGPU Struct Array** and **WebGPU Bytes To Struct Array** (wildcard struct arrays), **Get WGSL For Struct**, and the kernel's **Get Bindings** / **Get Workgroup Size**. If a struct buffer's UStruct and the shader's struct disagree, a warning lists the differing fields.
+
 See https://github.com/getnamo/WebGPUCompute-Unreal/issues/1 for tracking on initial usable build.
 
 [Discord Server](https://discord.gg/qfJUyxaW4s)

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "Kismet/BlueprintAsyncActionBase.h"
+#include "WebGPUStructLayout.h"
 #include "WebGPUTypes.h"
 #include "WebGPUBlueprintLibrary.generated.h"
 
@@ -39,6 +40,35 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "WebGPU")
 	static FWebGPUStats GetWebGPUStats();
+
+	/** A buffer of Count elements of a struct, in the struct's WGSL layout (Uniform-only usage uses uniform rules). */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Structs")
+	static UWebGPUBuffer* CreateWebGPUStructBuffer(UScriptStruct* StructType, int32 Count,
+		UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/WebGPUCompute.EWebGPUBufferUsage")) int32 Usage = 1,
+		const FString& Label = TEXT(""));
+
+	/** Like CreateWebGPUKernel, with the structs declared in WGSL ahead of the source so the shader can use them by name. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU|Structs")
+	static UWebGPUKernel* CreateWebGPUKernelWithStructs(const FString& Source, const TArray<UScriptStruct*>& Structs,
+		const FString& EntryPoint = TEXT("main"), const FString& Label = TEXT(""));
+
+	/** The WGSL declaration of a struct (and the structs it nests), e.g. to paste into a shader. Empty if unsupported. */
+	UFUNCTION(BlueprintPure, Category = "WebGPU|Structs")
+	static FString GetWGSLForStruct(UScriptStruct* StructType, EWebGPUAddressSpace Space = EWebGPUAddressSpace::Storage);
+
+	/** Writes an array of structs (any struct type) into a buffer from element FirstElement on. */
+	UFUNCTION(BlueprintCallable, CustomThunk, Category = "WebGPU|Structs", meta = (ArrayParm = "Items"))
+	static bool WriteWebGPUStructArray(UWebGPUBuffer* Buffer, const TArray<int32>& Items, int32 FirstElement = 0);
+	DECLARE_FUNCTION(execWriteWebGPUStructArray);
+
+	/** Unpacks bytes read from a struct buffer into an array of the connected struct type. */
+	UFUNCTION(BlueprintCallable, CustomThunk, Category = "WebGPU|Structs", meta = (ArrayParm = "OutItems"))
+	static bool WebGPUBytesToStructArray(const TArray<uint8>& Bytes, TArray<int32>& OutItems);
+	DECLARE_FUNCTION(execWebGPUBytesToStructArray);
+
+	/** Implementations of the wildcard nodes, for C++ callers holding an array property. */
+	static bool GenericWriteStructArray(UWebGPUBuffer* Buffer, const FArrayProperty* ArrayProperty, const void* ArrayAddress, int32 FirstElement);
+	static bool GenericBytesToStructArray(const TArray<uint8>& Bytes, const FArrayProperty* ArrayProperty, void* ArrayAddress);
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FWebGPUReadBufferPin, const TArray<uint8>&, Data);

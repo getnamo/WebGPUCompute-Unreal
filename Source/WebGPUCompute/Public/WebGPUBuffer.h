@@ -38,6 +38,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "WebGPU")
 	bool IsBufferValid() const { return Native.IsValid(); }
 
+	/** Struct buffers: number of elements (0 for raw buffers). */
+	UFUNCTION(BlueprintPure, Category = "WebGPU")
+	int32 GetElementCount() const { return Native ? Native->GetElementCount() : 0; }
+
+	/** Struct buffers: GPU bytes per element (0 for raw buffers). */
+	UFUNCTION(BlueprintPure, Category = "WebGPU")
+	int32 GetElementStride() const { return Native && Native->GetElementLayout() ? (int32)Native->GetElementLayout()->GetStride() : 0; }
+
 	/** Reads a byte range back after all earlier commands. Size < 0 reads to the end. */
 	void Read(int64 Offset, int64 Size, FWebGPUReadCallback&& Callback, EWebGPUCallbackThread Thread = EWebGPUCallbackThread::GameThread);
 

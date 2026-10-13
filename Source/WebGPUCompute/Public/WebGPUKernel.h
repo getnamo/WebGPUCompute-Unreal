@@ -29,6 +29,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
 	void SetBuffer(int32 Binding, UWebGPUBuffer* Buffer, int32 Group = 0);
 
+	/** Binds by WGSL variable name (e.g. "agents"); follows the binding if a shader edit moves it. None unbinds. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	void SetBufferByName(const FString& Name, UWebGPUBuffer* Buffer);
+
+	/** Dispatches enough workgroups to cover X*Y*Z invocations, using the shader's @workgroup_size. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	void DispatchForCount(int32 X, int32 Y = 1, int32 Z = 1);
+
+	/** Resources the entry point uses (from the last successful compile). */
+	UFUNCTION(BlueprintPure, Category = "WebGPU")
+	TArray<FWebGPUBindingInfo> GetBindings() const;
+
+	/** The entry point's @workgroup_size (zero before the first successful compile). */
+	UFUNCTION(BlueprintPure, Category = "WebGPU")
+	FIntVector GetWorkgroupSize() const;
+
+	/** The generated struct preamble plus the source: what was compiled. */
+	UFUNCTION(BlueprintPure, Category = "WebGPU")
+	FString GetCompiledSource() const;
+
 	/** Workgroup counts per dimension. Skipped until the kernel has compiled once. */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
 	void Dispatch(int32 X, int32 Y = 1, int32 Z = 1);

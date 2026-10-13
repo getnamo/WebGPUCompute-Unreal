@@ -7,6 +7,8 @@
 #include "Containers/Queue.h"
 #include "webgpu/webgpu.h"
 #include "WebGPUDevice.h"
+#include "WebGPUReflection.h"
+#include "WebGPUStructLayout.h"
 #include "WebGPUTypes.h"
 #include <atomic>
 
@@ -29,6 +31,10 @@ public:
 	const FString& GetLabel() const { return Label; }
 	TSharedPtr<FWebGPUContext> GetContext() const;
 
+	/** Struct buffers (FWebGPUContext::CreateStructBuffer): the element layout; null for raw buffers. */
+	const TSharedPtr<const FWebGPUStructLayout>& GetElementLayout() const { return ElementLayout; }
+	int32 GetElementCount() const { return ElementLayout ? (int32)(Size / ElementLayout->GetStride()) : 0; }
+
 	/** Worker thread only (FWebGPUContext::Enqueue). */
 	WGPUBuffer GetHandle() const { return Handle; }
 
@@ -39,6 +45,7 @@ private:
 	uint64 Size = 0;
 	EWebGPUBufferUsage Usage = EWebGPUBufferUsage::Storage;
 	FString Label;
+	TSharedPtr<const FWebGPUStructLayout> ElementLayout;
 
 	// Worker thread only
 	WGPUBuffer Handle = nullptr;
@@ -59,8 +66,20 @@ public:
 	/** True once a pipeline compiled successfully (stays true while a recompile is pending or failed). */
 	bool IsReady() const { return bReady; }
 
-	/** Errors and warnings from the most recent compile. */
+	/** Errors and warnings from the most recent compile (lines are relative to the source, after the preamble). */
 	TArray<FWebGPUCompileMessage> GetMessages() const;
+
+	/** Bindings, workgroup size and structs of the last successful compile; null before one. */
+	TSharedPtr<const FWebGPUShaderReflection> GetReflection() const;
+
+	/** The kernel's entry point in GetReflection(). False before a successful compile. */
+	bool GetEntryPointInfo(FWebGPUEntryPointInfo& OutInfo) const;
+
+	/** WGSL generated from UStructs and prepended to the source (see FWebGPUKernelDesc::Structs). */
+	const FString& GetPreamble() const { return Preamble; }
+
+	/** Preamble plus the source of the most recent compile: what Dawn actually compiled. */
+	FString GetCompiledSource() const;
 
 	/** GPU time of the last profiled dispatch and its running average (see FWebGPUContext::SetProfiling). */
 	double GetLastGpuTimeMs() const { return LastGpuTimeMs; }
@@ -78,16 +97,22 @@ private:
 
 	TWeakPtr<FWebGPUContext> Context;
 	FString Label;
+	FString EntryPoint;
+	FString Preamble;
+	int32 PreambleLines = 0;
 	std::atomic<bool> bReady = false;
 	std::atomic<double> LastGpuTimeMs = 0.0;
 	std::atomic<double> AverageGpuTimeMs = 0.0;
 
-	mutable FCriticalSection MessagesLock;
+	mutable FCriticalSection StateLock;
 	TArray<FWebGPUCompileMessage> Messages;
+	TSharedPtr<const FWebGPUShaderReflection> Reflection;
+	FString CompiledSource;
 
 	// Worker thread only
 	FString Source;
-	FString EntryPoint;
+	TSharedPtr<const FWebGPUShaderReflection> WorkerReflection;
+	const FWebGPUEntryPointInfo* EntryInfo = nullptr;
 	WGPUComputePipeline Pipeline = nullptr;
 	uint32 CompileSerial = 0;
 	uint32 AppliedSerial = 0;
@@ -96,12 +121,27 @@ private:
 	FWebGPUCompileCallback Listener;
 	EWebGPUCallbackThread ListenerThread = EWebGPUCallbackThread::GameThread;
 	TSortedMap<uint32, TSortedMap<uint32, FBinding>> Bindings;
+	TMap<FString, FBinding> NamedBindings;
 	TSortedMap<uint32, WGPUBindGroup> BindGroups;
 	bool bBindGroupsDirty = true;
+	bool bBindingsValid = false;
+	TSet<FString> Warned;
 
 	void SetMessages(const TArray<FWebGPUCompileMessage>& InMessages);
 	void ReleaseBindGroups();
 	void ReleaseGPU();
+};
+
+/** How to build a kernel. */
+struct FWebGPUKernelDesc
+{
+	/** WGSL source. */
+	FString Source;
+	FString EntryPoint = TEXT("main");
+	FString Label;
+
+	/** UStructs declared as WGSL structs (storage layout) in a preamble before the source, so shaders can use them by name. */
+	TArray<const UScriptStruct*> Structs;
 };
 
 /**
@@ -135,7 +175,11 @@ public:
 	TSharedRef<FWebGPUKernel> CreateKernel(const FString& Source, const FString& EntryPoint = TEXT("main"), const FString& Label = FString(),
 		FWebGPUCompileCallback OnCompiled = nullptr, EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
 
-	/** Compiles new source. The previous pipeline keeps running until the new one succeeds. OnCompiled fires once (the listener fires too). */
+	/** Same, from a description. Struct layouts are read from UObject reflection: call from the game thread when Structs is set. */
+	TSharedRef<FWebGPUKernel> CreateKernel(const FWebGPUKernelDesc& Desc, FWebGPUCompileCallback OnCompiled = nullptr,
+		EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
+
+	/** Compiles new source (the preamble is kept). The previous pipeline keeps running until the new one succeeds. OnCompiled fires once (the listener fires too). */
 	void RecompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, const FString& Source,
 		FWebGPUCompileCallback OnCompiled = nullptr, EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
 
@@ -149,7 +193,21 @@ public:
 	void SetBuffer(const TSharedRef<FWebGPUKernel>& Kernel, uint32 Group, uint32 Binding, const TSharedPtr<FWebGPUBuffer>& Buffer,
 		uint64 Offset = 0, uint64 Size = WGPU_WHOLE_SIZE);
 
+	/**
+	 * Binds by WGSL variable name, resolved against the kernel's reflection at dispatch time, so it follows
+	 * bindings that move when the shader is edited. Null unbinds.
+	 */
+	void SetBufferByName(const TSharedRef<FWebGPUKernel>& Kernel, const FString& Name, const TSharedPtr<FWebGPUBuffer>& Buffer,
+		uint64 Offset = 0, uint64 Size = WGPU_WHOLE_SIZE);
+
+	/**
+	 * Dispatches X*Y*Z workgroups. Before encoding, the kernel's bindings are checked against its reflection:
+	 * a missing, too small or wrongly-used buffer skips this dispatch with a warning instead of failing the batch.
+	 */
 	void Dispatch(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X, uint32 Y = 1, uint32 Z = 1);
+
+	/** Dispatches enough workgroups to cover X*Y*Z invocations, using the entry point's @workgroup_size. */
+	void DispatchForCount(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X, uint32 Y = 1, uint32 Z = 1);
 
 	/** Measures each dispatch of this kernel with GPU timestamps (needs the TimestampQuery feature). */
 	void SetProfiling(const TSharedRef<FWebGPUKernel>& Kernel, bool bEnabled);
@@ -157,6 +215,44 @@ public:
 	/** Copies a buffer range to the CPU after all earlier commands. Offset and size must be multiples of 4. */
 	void ReadBuffer(const TSharedRef<FWebGPUBuffer>& Buffer, uint64 Offset, uint64 Size, FWebGPUReadCallback&& Callback,
 		EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
+
+	// Struct arrays. Layouts come from UObject reflection: call these from the game thread.
+
+	/** A buffer of Count elements of Struct in its WGSL storage layout (see FWebGPUStructLayout). */
+	TSharedPtr<FWebGPUBuffer> CreateStructBuffer(const UScriptStruct* Struct, int32 Count, EWebGPUBufferUsage Usage = EWebGPUBufferUsage::Storage, const FString& Label = FString());
+
+	/** Packs Count UE structs (a memcpy when the layouts match) and writes them from element FirstElement on. */
+	bool WriteStructs(const TSharedRef<FWebGPUBuffer>& Buffer, const UScriptStruct* Struct, const void* Elements, int32 Count, int32 FirstElement = 0);
+
+	template <typename T>
+	bool WriteStructArray(const TSharedRef<FWebGPUBuffer>& Buffer, const TArray<T>& Items, int32 FirstElement = 0)
+	{
+		return WriteStructs(Buffer, T::StaticStruct(), Items.GetData(), Items.Num(), FirstElement);
+	}
+
+	/** Reads Count elements from FirstElement on and unpacks them into UE structs on the game thread. */
+	template <typename T>
+	void ReadStructArray(const TSharedRef<FWebGPUBuffer>& Buffer, int32 FirstElement, int32 Count, TUniqueFunction<void(bool bSuccess, TArray<T>&& Items)>&& Callback)
+	{
+		const EWebGPUAddressSpace Space = Buffer->GetElementLayout() ? Buffer->GetElementLayout()->GetAddressSpace() : EWebGPUAddressSpace::Storage;
+		TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(T::StaticStruct(), Space);
+		if (!Layout || Count <= 0)
+		{
+			Callback(false, TArray<T>());
+			return;
+		}
+		ReadBuffer(Buffer, (uint64)FirstElement * Layout->GetStride(), (uint64)Count * Layout->GetStride(),
+			[Layout, Count, Callback = MoveTemp(Callback)](bool bSuccess, TArray<uint8>&& Bytes) mutable
+			{
+				TArray<T> Items;
+				if (bSuccess)
+				{
+					Items.SetNum(Count);
+					Layout->Unpack(Bytes.GetData(), Count, Items.GetData());
+				}
+				Callback(bSuccess, MoveTemp(Items));
+			}, EWebGPUCallbackThread::GameThread);
+	}
 
 	/** Blocks until every command enqueued so far has finished on the GPU. Never call from the worker thread. */
 	bool Flush(double TimeoutSeconds = 10.0);
@@ -191,6 +287,7 @@ private:
 	void FinishCompile(FWebGPUKernel& Kernel, bool bSuccess, const TArray<FWebGPUCompileMessage>& Messages, FWebGPUCompileCallback&& OnCompiled, EWebGPUCallbackThread CallbackThread);
 	void EncodeDispatch(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X, uint32 Y, uint32 Z);
 	bool UpdateBindGroups(FWebGPUKernel& Kernel);
+	void WarnOnce(FWebGPUKernel& Kernel, const FString& Message);
 	void ReadBufferOnWorker(FWebGPUBuffer& Buffer, uint64 Offset, uint64 Size, FWebGPUReadCallback&& Callback, EWebGPUCallbackThread CallbackThread);
 	WGPUCommandEncoder GetEncoder();
 	void SubmitBatch();

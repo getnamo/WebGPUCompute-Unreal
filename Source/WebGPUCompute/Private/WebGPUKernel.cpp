@@ -29,6 +29,43 @@ void UWebGPUKernel::Dispatch(int32 X, int32 Y, int32 Z)
 	}
 }
 
+void UWebGPUKernel::SetBufferByName(const FString& Name, UWebGPUBuffer* Buffer)
+{
+	if (TSharedPtr<FWebGPUContext> Context = GetContext())
+	{
+		Context->SetBufferByName(Native.ToSharedRef(), Name, Buffer ? Buffer->GetNative() : nullptr);
+	}
+}
+
+void UWebGPUKernel::DispatchForCount(int32 X, int32 Y, int32 Z)
+{
+	if (X <= 0 || Y <= 0 || Z <= 0)
+	{
+		return;
+	}
+	if (TSharedPtr<FWebGPUContext> Context = GetContext())
+	{
+		Context->DispatchForCount(Native.ToSharedRef(), (uint32)X, (uint32)Y, (uint32)Z);
+	}
+}
+
+TArray<FWebGPUBindingInfo> UWebGPUKernel::GetBindings() const
+{
+	FWebGPUEntryPointInfo Info;
+	return Native && Native->GetEntryPointInfo(Info) ? Info.Bindings : TArray<FWebGPUBindingInfo>();
+}
+
+FIntVector UWebGPUKernel::GetWorkgroupSize() const
+{
+	FWebGPUEntryPointInfo Info;
+	return Native && Native->GetEntryPointInfo(Info) ? Info.WorkgroupSize : FIntVector::ZeroValue;
+}
+
+FString UWebGPUKernel::GetCompiledSource() const
+{
+	return Native ? Native->GetCompiledSource() : FString();
+}
+
 void UWebGPUKernel::Recompile(const FString& Source)
 {
 	if (TSharedPtr<FWebGPUContext> Context = GetContext())

@@ -21,25 +21,164 @@ UWebGPUBuffer* UWebGPUBlueprintLibrary::CreateWebGPUBuffer(int64 Size, int32 Usa
 	return Buffer;
 }
 
+namespace
+{
+	UWebGPUKernel* MakeKernel(const FWebGPUKernelDesc& Desc)
+	{
+		TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
+		if (!Context)
+		{
+			return nullptr;
+		}
+
+		UWebGPUKernel* Kernel = NewObject<UWebGPUKernel>();
+		TWeakObjectPtr<UWebGPUKernel> WeakKernel = Kernel;
+		Kernel->Initialize(Context->CreateKernel(Desc,
+			[WeakKernel](bool bSuccess, const TArray<FWebGPUCompileMessage>& Messages)
+			{
+				if (UWebGPUKernel* Alive = WeakKernel.Get())
+				{
+					Alive->HandleCompiled(bSuccess, Messages);
+				}
+			}, EWebGPUCallbackThread::GameThread));
+		return Kernel;
+	}
+
+	const FStructProperty* GetStructInner(const FArrayProperty* ArrayProperty, const TCHAR* Function)
+	{
+		const FStructProperty* Inner = ArrayProperty ? CastField<FStructProperty>(ArrayProperty->Inner) : nullptr;
+		if (!Inner)
+		{
+			UE_LOG(LogWebGPU, Error, TEXT("%s needs an array of structs"), Function);
+		}
+		return Inner;
+	}
+}
+
 UWebGPUKernel* UWebGPUBlueprintLibrary::CreateWebGPUKernel(const FString& Source, const FString& EntryPoint, const FString& Label)
+{
+	FWebGPUKernelDesc Desc;
+	Desc.Source = Source;
+	Desc.EntryPoint = EntryPoint;
+	Desc.Label = Label;
+	return MakeKernel(Desc);
+}
+
+UWebGPUKernel* UWebGPUBlueprintLibrary::CreateWebGPUKernelWithStructs(const FString& Source, const TArray<UScriptStruct*>& Structs, const FString& EntryPoint, const FString& Label)
+{
+	FWebGPUKernelDesc Desc;
+	Desc.Source = Source;
+	Desc.EntryPoint = EntryPoint;
+	Desc.Label = Label;
+	for (UScriptStruct* Struct : Structs)
+	{
+		Desc.Structs.Add(Struct);
+	}
+	return MakeKernel(Desc);
+}
+
+UWebGPUBuffer* UWebGPUBlueprintLibrary::CreateWebGPUStructBuffer(UScriptStruct* StructType, int32 Count, int32 Usage, const FString& Label)
 {
 	TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
 	if (!Context)
 	{
 		return nullptr;
 	}
+	const EWebGPUBufferUsage BufferUsage = Usage == 0 ? EWebGPUBufferUsage::Storage : (EWebGPUBufferUsage)Usage;
+	TSharedPtr<FWebGPUBuffer> Native = Context->CreateStructBuffer(StructType, Count, BufferUsage, Label);
+	if (!Native)
+	{
+		return nullptr;
+	}
+	UWebGPUBuffer* Buffer = NewObject<UWebGPUBuffer>();
+	Buffer->Initialize(Native.ToSharedRef());
+	return Buffer;
+}
 
-	UWebGPUKernel* Kernel = NewObject<UWebGPUKernel>();
-	TWeakObjectPtr<UWebGPUKernel> WeakKernel = Kernel;
-	Kernel->Initialize(Context->CreateKernel(Source, EntryPoint, Label,
-		[WeakKernel](bool bSuccess, const TArray<FWebGPUCompileMessage>& Messages)
-		{
-			if (UWebGPUKernel* Alive = WeakKernel.Get())
-			{
-				Alive->HandleCompiled(bSuccess, Messages);
-			}
-		}, EWebGPUCallbackThread::GameThread));
-	return Kernel;
+FString UWebGPUBlueprintLibrary::GetWGSLForStruct(UScriptStruct* StructType, EWebGPUAddressSpace Space)
+{
+	FString Error;
+	TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(StructType, Space, Error);
+	if (!Layout)
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("GetWGSLForStruct: %s"), *Error);
+		return FString();
+	}
+	return Layout->GenerateWGSL();
+}
+
+bool UWebGPUBlueprintLibrary::GenericWriteStructArray(UWebGPUBuffer* Buffer, const FArrayProperty* ArrayProperty, const void* ArrayAddress, int32 FirstElement)
+{
+	const FStructProperty* Inner = GetStructInner(ArrayProperty, TEXT("WriteWebGPUStructArray"));
+	if (!Inner || !ArrayAddress)
+	{
+		return false;
+	}
+	TSharedPtr<FWebGPUContext> Context = Buffer && Buffer->GetNative() ? Buffer->GetNative()->GetContext() : nullptr;
+	if (!Context)
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("WriteWebGPUStructArray: no valid buffer"));
+		return false;
+	}
+	FScriptArrayHelper Helper(ArrayProperty, ArrayAddress);
+	if (Helper.Num() == 0)
+	{
+		return true;
+	}
+	return Context->WriteStructs(Buffer->GetNative().ToSharedRef(), Inner->Struct, Helper.GetRawPtr(0), Helper.Num(), FirstElement);
+}
+
+bool UWebGPUBlueprintLibrary::GenericBytesToStructArray(const TArray<uint8>& Bytes, const FArrayProperty* ArrayProperty, void* ArrayAddress)
+{
+	const FStructProperty* Inner = GetStructInner(ArrayProperty, TEXT("WebGPUBytesToStructArray"));
+	if (!Inner || !ArrayAddress)
+	{
+		return false;
+	}
+	FString Error;
+	TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(Inner->Struct, EWebGPUAddressSpace::Storage, Error);
+	if (!Layout)
+	{
+		UE_LOG(LogWebGPU, Error, TEXT("WebGPUBytesToStructArray: %s"), *Error);
+		return false;
+	}
+	const int32 Count = Bytes.Num() / (int32)Layout->GetStride();
+	FScriptArrayHelper Helper(ArrayProperty, ArrayAddress);
+	Helper.Resize(Count);
+	if (Count > 0)
+	{
+		Layout->Unpack(Bytes.GetData(), Count, Helper.GetRawPtr(0));
+	}
+	return true;
+}
+
+DEFINE_FUNCTION(UWebGPUBlueprintLibrary::execWriteWebGPUStructArray)
+{
+	P_GET_OBJECT(UWebGPUBuffer, Buffer);
+	Stack.MostRecentProperty = nullptr;
+	Stack.StepCompiledIn<FArrayProperty>(nullptr);
+	const void* ArrayAddress = Stack.MostRecentPropertyAddress;
+	const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Stack.MostRecentProperty);
+	P_GET_PROPERTY(FIntProperty, FirstElement);
+	P_FINISH;
+
+	P_NATIVE_BEGIN;
+	*(bool*)RESULT_PARAM = GenericWriteStructArray(Buffer, ArrayProperty, ArrayAddress, FirstElement);
+	P_NATIVE_END;
+}
+
+DEFINE_FUNCTION(UWebGPUBlueprintLibrary::execWebGPUBytesToStructArray)
+{
+	P_GET_TARRAY_REF(uint8, Bytes);
+	Stack.MostRecentProperty = nullptr;
+	Stack.StepCompiledIn<FArrayProperty>(nullptr);
+	void* ArrayAddress = Stack.MostRecentPropertyAddress;
+	const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Stack.MostRecentProperty);
+	P_FINISH;
+
+	P_NATIVE_BEGIN;
+	*(bool*)RESULT_PARAM = GenericBytesToStructArray(Bytes, ArrayProperty, ArrayAddress);
+	P_NATIVE_END;
 }
 
 int32 UWebGPUBlueprintLibrary::WorkgroupsForCount(int32 Count, int32 WorkgroupSize)

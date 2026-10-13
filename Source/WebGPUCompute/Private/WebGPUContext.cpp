@@ -45,6 +45,27 @@ namespace
 	}
 
 	constexpr uint64 MinStagingSize = 256;
+
+	/** Compile messages refer to preamble + source; report source lines, and flag errors inside the preamble. */
+	void RemapPreambleLines(TArray<FWebGPUCompileMessage>& Messages, int32 PreambleLines)
+	{
+		if (PreambleLines <= 0)
+		{
+			return;
+		}
+		for (FWebGPUCompileMessage& Message : Messages)
+		{
+			if (Message.Line > (uint64)PreambleLines)
+			{
+				Message.Line -= PreambleLines;
+			}
+			else if (Message.Line > 0)
+			{
+				Message.Message = FString::Printf(TEXT("[generated struct preamble, line %llu] %s"), Message.Line, *Message.Message);
+				Message.Line = 0;
+			}
+		}
+	}
 	constexpr int32 MaxPooledStagingPerSize = 4;
 
 	/** Shared between a Flush caller and the worker so a timed-out wait never touches a dead event. */
@@ -81,6 +102,7 @@ struct FWebGPUContext::FCompileRequest
 	uint32 Serial = 0;
 	uint32 Generation = 0;
 	TArray<FWebGPUCompileMessage> Messages;
+	TSharedPtr<const FWebGPUShaderReflection> Reflection;
 	FWebGPUCompileCallback Callback;
 	EWebGPUCallbackThread Thread = EWebGPUCallbackThread::GameThread;
 };
@@ -149,14 +171,37 @@ TSharedPtr<FWebGPUContext> FWebGPUKernel::GetContext() const
 
 TArray<FWebGPUCompileMessage> FWebGPUKernel::GetMessages() const
 {
-	FScopeLock Lock(&MessagesLock);
+	FScopeLock Lock(&StateLock);
 	return Messages;
 }
 
 void FWebGPUKernel::SetMessages(const TArray<FWebGPUCompileMessage>& InMessages)
 {
-	FScopeLock Lock(&MessagesLock);
+	FScopeLock Lock(&StateLock);
 	Messages = InMessages;
+}
+
+TSharedPtr<const FWebGPUShaderReflection> FWebGPUKernel::GetReflection() const
+{
+	FScopeLock Lock(&StateLock);
+	return Reflection;
+}
+
+bool FWebGPUKernel::GetEntryPointInfo(FWebGPUEntryPointInfo& OutInfo) const
+{
+	FScopeLock Lock(&StateLock);
+	const FWebGPUEntryPointInfo* Info = Reflection ? Reflection->FindEntryPoint(EntryPoint) : nullptr;
+	if (Info)
+	{
+		OutInfo = *Info;
+	}
+	return Info != nullptr;
+}
+
+FString FWebGPUKernel::GetCompiledSource() const
+{
+	FScopeLock Lock(&StateLock);
+	return CompiledSource;
 }
 
 void FWebGPUKernel::ReleaseBindGroups()
@@ -413,15 +458,47 @@ TSharedRef<FWebGPUBuffer> FWebGPUContext::CreateBuffer(uint64 Size, EWebGPUBuffe
 TSharedRef<FWebGPUKernel> FWebGPUContext::CreateKernel(const FString& Source, const FString& EntryPoint, const FString& Label,
 	FWebGPUCompileCallback OnCompiled, EWebGPUCallbackThread CallbackThread)
 {
+	FWebGPUKernelDesc Desc;
+	Desc.Source = Source;
+	Desc.EntryPoint = EntryPoint;
+	Desc.Label = Label;
+	return CreateKernel(Desc, MoveTemp(OnCompiled), CallbackThread);
+}
+
+TSharedRef<FWebGPUKernel> FWebGPUContext::CreateKernel(const FWebGPUKernelDesc& Desc, FWebGPUCompileCallback OnCompiled, EWebGPUCallbackThread CallbackThread)
+{
 	TSharedRef<FWebGPUKernel> Kernel = MakeShared<FWebGPUKernel>();
 	Kernel->Context = AsShared();
-	Kernel->Label = Label.IsEmpty() ? EntryPoint : Label;
+	Kernel->EntryPoint = Desc.EntryPoint;
+	Kernel->Label = Desc.Label.IsEmpty() ? Desc.EntryPoint : Desc.Label;
 
-	Enqueue([this, Kernel, Source, EntryPoint, OnCompiled = MoveTemp(OnCompiled), CallbackThread]() mutable
+	// UStructs become WGSL declarations ahead of the source (built here: it reads UObject reflection)
+	if (Desc.Structs.Num() > 0)
+	{
+		TArray<TSharedPtr<const FWebGPUStructLayout>> Layouts;
+		for (const UScriptStruct* Struct : Desc.Structs)
+		{
+			FString Error;
+			if (TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(Struct, EWebGPUAddressSpace::Storage, Error))
+			{
+				Layouts.Add(Layout);
+			}
+			else
+			{
+				UE_LOG(LogWebGPU, Error, TEXT("Kernel '%s': struct %s left out of the preamble: %s"), *Kernel->Label, Struct ? *Struct->GetName() : TEXT("null"), *Error);
+			}
+		}
+		Kernel->Preamble = FWebGPUStructLayout::GenerateWGSL(Layouts);
+		for (TCHAR Char : Kernel->Preamble)
+		{
+			Kernel->PreambleLines += Char == TEXT('\n') ? 1 : 0;
+		}
+	}
+
+	Enqueue([this, Kernel, Source = Desc.Source, OnCompiled = MoveTemp(OnCompiled), CallbackThread]() mutable
 	{
 		LiveKernels.Add(Kernel);
 		Kernel->Source = Source;
-		Kernel->EntryPoint = EntryPoint;
 		Kernel->Listener = MoveTemp(OnCompiled);
 		Kernel->ListenerThread = CallbackThread;
 		CompileKernel(Kernel, nullptr, CallbackThread);
@@ -505,6 +582,107 @@ void FWebGPUContext::Dispatch(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X,
 	{
 		EncodeDispatch(Kernel, X, Y, Z);
 	});
+}
+
+void FWebGPUContext::SetBufferByName(const TSharedRef<FWebGPUKernel>& Kernel, const FString& Name, const TSharedPtr<FWebGPUBuffer>& Buffer, uint64 Offset, uint64 Size)
+{
+	Enqueue([Kernel, Name, Buffer, Offset, Size]()
+	{
+		if (Buffer)
+		{
+			FWebGPUKernel::FBinding& Entry = Kernel->NamedBindings.FindOrAdd(Name);
+			Entry.Buffer = Buffer;
+			Entry.Offset = Offset;
+			Entry.Size = Size;
+		}
+		else
+		{
+			Kernel->NamedBindings.Remove(Name);
+		}
+		Kernel->bBindGroupsDirty = true;
+	});
+}
+
+void FWebGPUContext::DispatchForCount(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X, uint32 Y, uint32 Z)
+{
+	Enqueue([this, Kernel, X, Y, Z]()
+	{
+		if (X == 0 || Y == 0 || Z == 0)
+		{
+			return;
+		}
+		if (!Kernel->EntryInfo)
+		{
+			// Not compiled yet: counted and warned as a skipped dispatch
+			EncodeDispatch(Kernel, 1, 1, 1);
+			return;
+		}
+		const FIntVector WorkgroupSize = Kernel->EntryInfo->WorkgroupSize;
+		if (WorkgroupSize.X <= 0 || WorkgroupSize.Y <= 0 || WorkgroupSize.Z <= 0)
+		{
+			StatSkippedDispatches++;
+			WarnOnce(*Kernel, FString::Printf(TEXT("Kernel '%s': DispatchForCount needs a constant @workgroup_size; use Dispatch"), *Kernel->Label));
+			return;
+		}
+		EncodeDispatch(Kernel, FMath::DivideAndRoundUp(X, (uint32)WorkgroupSize.X), FMath::DivideAndRoundUp(Y, (uint32)WorkgroupSize.Y), FMath::DivideAndRoundUp(Z, (uint32)WorkgroupSize.Z));
+	});
+}
+
+TSharedPtr<FWebGPUBuffer> FWebGPUContext::CreateStructBuffer(const UScriptStruct* Struct, int32 Count, EWebGPUBufferUsage Usage, const FString& Label)
+{
+	const bool bUniformOnly = EnumHasAnyFlags(Usage, EWebGPUBufferUsage::Uniform) && !EnumHasAnyFlags(Usage, EWebGPUBufferUsage::Storage);
+	FString Error;
+	TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(Struct, bUniformOnly ? EWebGPUAddressSpace::Uniform : EWebGPUAddressSpace::Storage, Error);
+	if (!Layout || Count <= 0)
+	{
+		UE_LOG(LogWebGPU, Error, TEXT("CreateStructBuffer(%s, %d): %s"), Struct ? *Struct->GetName() : TEXT("null"), Count, Layout ? TEXT("count must be positive") : *Error);
+		return nullptr;
+	}
+
+	TSharedRef<FWebGPUBuffer> Buffer = MakeShared<FWebGPUBuffer>();
+	Buffer->Context = AsShared();
+	Buffer->Size = (uint64)Count * Layout->GetStride();
+	Buffer->Usage = Usage;
+	Buffer->Label = Label.IsEmpty() ? Struct->GetName() : Label;
+	Buffer->ElementLayout = Layout;
+
+	Enqueue([this, Buffer]()
+	{
+		LiveBuffers.Add(Buffer);
+		CreateBufferHandle(*Buffer);
+	});
+	return Buffer;
+}
+
+bool FWebGPUContext::WriteStructs(const TSharedRef<FWebGPUBuffer>& Buffer, const UScriptStruct* Struct, const void* Elements, int32 Count, int32 FirstElement)
+{
+	const EWebGPUAddressSpace Space = Buffer->ElementLayout ? Buffer->ElementLayout->GetAddressSpace() : EWebGPUAddressSpace::Storage;
+	FString Error;
+	TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(Struct, Space, Error);
+	if (!Layout)
+	{
+		UE_LOG(LogWebGPU, Error, TEXT("WriteStructs(%s): %s"), *Buffer->GetLabel(), *Error);
+		return false;
+	}
+	if (Count <= 0)
+	{
+		return true;
+	}
+	if (Buffer->ElementLayout && Buffer->ElementLayout->GetStructName() != Layout->GetStructName())
+	{
+		UE_LOG(LogWebGPU, Warning, TEXT("WriteStructs(%s): writing %s into a buffer of %s"), *Buffer->GetLabel(), *Layout->GetStructName(), *Buffer->ElementLayout->GetStructName());
+	}
+
+	const uint64 Offset = (uint64)FMath::Max(FirstElement, 0) * Layout->GetStride();
+	const uint64 Size = (uint64)Count * Layout->GetStride();
+	if (Offset + Size > Buffer->GetSize())
+	{
+		UE_LOG(LogWebGPU, Error, TEXT("WriteStructs(%s): elements %d..%d don't fit in %llu bytes (%u per element)"),
+			*Buffer->GetLabel(), FirstElement, FirstElement + Count - 1, Buffer->GetSize(), Layout->GetStride());
+		return false;
+	}
+	WriteBuffer(Buffer, Offset, Layout->Pack(Elements, Count));
+	return true;
 }
 
 void FWebGPUContext::SetProfiling(const TSharedRef<FWebGPUKernel>& Kernel, bool bEnabled)
@@ -620,12 +798,49 @@ void FWebGPUContext::CompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, FWeb
 		return;
 	}
 
+	const FString FullSource = Kernel->Preamble + Kernel->Source;
+	{
+		FScopeLock Lock(&Kernel->StateLock);
+		Kernel->CompiledSource = FullSource;
+	}
+
 	TArray<FWebGPUCompileMessage> Messages;
-	WGPUShaderModule Module = WorkerDevice->CreateShaderModule(Kernel->Source, Kernel->Label, Messages);
+	WGPUShaderModule Module = WorkerDevice->CreateShaderModule(FullSource, Kernel->Label, Messages);
+	RemapPreambleLines(Messages, Kernel->PreambleLines);
 	if (!Module)
 	{
 		FinishCompile(*Kernel, false, Messages, MoveTemp(OnCompiled), CallbackThread);
 		return;
+	}
+
+	// Tint reflection (bindings, workgroup size, struct layouts) of this exact source
+	TSharedPtr<FWebGPUShaderReflection> Reflection = MakeShared<FWebGPUShaderReflection>();
+	TArray<FWebGPUCompileMessage> ReflectionMessages;
+	if (!FWebGPUShaderReflection::Reflect(FullSource, *Reflection, ReflectionMessages))
+	{
+		Reflection.Reset();
+	}
+	else
+	{
+		const FWebGPUEntryPointInfo* Entry = Reflection->FindEntryPoint(Kernel->EntryPoint);
+		if (!Entry || !Entry->bCompute)
+		{
+			TArray<FString> ComputeEntries;
+			for (const FWebGPUEntryPointInfo& Info : Reflection->EntryPoints)
+			{
+				if (Info.bCompute)
+				{
+					ComputeEntries.Add(Info.Name);
+				}
+			}
+			FWebGPUCompileMessage& Error = Messages.AddDefaulted_GetRef();
+			Error.bIsError = true;
+			Error.Message = FString::Printf(TEXT("No @compute entry point '%s' (compute entry points: %s)"), *Kernel->EntryPoint,
+				ComputeEntries.Num() ? *FString::Join(ComputeEntries, TEXT(", ")) : TEXT("none"));
+			wgpuShaderModuleRelease(Module);
+			FinishCompile(*Kernel, false, Messages, MoveTemp(OnCompiled), CallbackThread);
+			return;
+		}
 	}
 
 	FTCHARToUTF8 EntryPoint(*Kernel->EntryPoint);
@@ -642,6 +857,7 @@ void FWebGPUContext::CompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, FWeb
 	Request->Serial = Serial;
 	Request->Generation = DeviceGeneration;
 	Request->Messages = MoveTemp(Messages);
+	Request->Reflection = Reflection;
 	Request->Callback = MoveTemp(OnCompiled);
 	Request->Thread = CallbackThread;
 
@@ -703,6 +919,13 @@ void FWebGPUContext::OnPipelineCreated(WGPUCreatePipelineAsyncStatus Status, WGP
 			}
 			Kernel->Pipeline = Pipeline;
 			Kernel->AppliedSerial = Request->Serial;
+			Kernel->WorkerReflection = Request->Reflection;
+			Kernel->EntryInfo = Request->Reflection ? Request->Reflection->FindEntryPoint(Kernel->EntryPoint) : nullptr;
+			Kernel->Warned.Reset();
+			{
+				FScopeLock Lock(&Kernel->StateLock);
+				Kernel->Reflection = Request->Reflection;
+			}
 			Kernel->bReady = true;
 			Kernel->bWarnedNotReady = false;
 		}
@@ -726,42 +949,157 @@ void FWebGPUContext::OnPipelineCreated(WGPUCreatePipelineAsyncStatus Status, WGP
 	Self.FinishCompile(*Kernel, bSuccess, Request->Messages, MoveTemp(Request->Callback), Request->Thread);
 }
 
+void FWebGPUContext::WarnOnce(FWebGPUKernel& Kernel, const FString& Message)
+{
+	if (!Kernel.Warned.Contains(Message))
+	{
+		Kernel.Warned.Add(Message);
+		UE_LOG(LogWebGPU, Warning, TEXT("%s"), *Message);
+	}
+}
+
 bool FWebGPUContext::UpdateBindGroups(FWebGPUKernel& Kernel)
 {
 	if (!Kernel.bBindGroupsDirty)
 	{
-		return true;
+		return Kernel.bBindingsValid;
 	}
-
 	Kernel.ReleaseBindGroups();
+	Kernel.bBindGroupsDirty = false;
+	Kernel.bBindingsValid = false;
+
+	// Explicit (group, binding) bindings, then names resolved through the reflection
+	auto Key = [](uint32 Group, uint32 Binding) { return ((uint64)Group << 32) | Binding; };
+	TMap<uint64, const FWebGPUKernel::FBinding*> Resolved;
 	for (const TPair<uint32, TSortedMap<uint32, FWebGPUKernel::FBinding>>& Group : Kernel.Bindings)
 	{
-		TArray<WGPUBindGroupEntry> Entries;
 		for (const TPair<uint32, FWebGPUKernel::FBinding>& Binding : Group.Value)
 		{
-			const FWebGPUKernel::FBinding& Bound = Binding.Value;
+			Resolved.Add(Key(Group.Key, Binding.Key), &Binding.Value);
+		}
+	}
+
+	const FWebGPUEntryPointInfo* Entry = Kernel.EntryInfo;
+	for (const TPair<FString, FWebGPUKernel::FBinding>& Named : Kernel.NamedBindings)
+	{
+		if (!Entry)
+		{
+			WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': can't resolve binding '%s' without shader reflection"), *Kernel.Label, *Named.Key));
+			continue;
+		}
+		if (const FWebGPUBindingInfo* Info = Entry->FindBinding(Named.Key))
+		{
+			Resolved.Add(Key(Info->Group, Info->Binding), &Named.Value);
+		}
+		else
+		{
+			TArray<FString> Names;
+			for (const FWebGPUBindingInfo& Binding : Entry->Bindings)
+			{
+				Names.Add(Binding.Name);
+			}
+			WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': entry point '%s' uses no binding named '%s' (it uses: %s)"),
+				*Kernel.Label, *Entry->Name, *Named.Key, Names.Num() ? *FString::Join(Names, TEXT(", ")) : TEXT("none")));
+		}
+	}
+
+	TSortedMap<uint32, TArray<WGPUBindGroupEntry>> Groups;
+	if (Entry)
+	{
+		// Exactly the resources the entry point uses: extra bindings are ignored, missing or invalid ones skip the dispatch
+		TArray<FString> Problems;
+		for (const FWebGPUBindingInfo& Info : Entry->Bindings)
+		{
+			if (!Info.IsBuffer())
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' is a texture or sampler, which can't be bound yet"), *Info.Name));
+				continue;
+			}
+			const FWebGPUKernel::FBinding* const* Found = Resolved.Find(Key(Info.Group, Info.Binding));
+			if (!Found || !(*Found)->Buffer)
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' (@group(%d) @binding(%d)) is not bound"), *Info.Name, Info.Group, Info.Binding));
+				continue;
+			}
+			const FWebGPUKernel::FBinding& Bound = **Found;
+			const FWebGPUBuffer& Buffer = *Bound.Buffer;
+			if (!Buffer.Handle)
+			{
+				Problems.Add(FString::Printf(TEXT("'%s': buffer '%s' has no GPU memory"), *Info.Name, *Buffer.Label));
+				continue;
+			}
+			const uint64 BoundSize = Bound.Size == WGPU_WHOLE_SIZE ? Buffer.Size - FMath::Min(Bound.Offset, Buffer.Size) : Bound.Size;
+			if (BoundSize < (uint64)Info.MinSize)
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' needs at least %lld bytes, buffer '%s' provides %llu"), *Info.Name, Info.MinSize, *Buffer.Label, BoundSize));
+			}
+			if (Info.Type == EWebGPUBindingType::UniformBuffer && !EnumHasAnyFlags(Buffer.Usage, EWebGPUBufferUsage::Uniform))
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' is var<uniform> but buffer '%s' was not created with the Uniform usage"), *Info.Name, *Buffer.Label));
+			}
+			else if (Info.Type != EWebGPUBindingType::UniformBuffer && !EnumHasAnyFlags(Buffer.Usage, EWebGPUBufferUsage::Storage))
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' is var<storage> but buffer '%s' was not created with the Storage usage"), *Info.Name, *Buffer.Label));
+			}
+
+			// Struct buffers: the UStruct layout should be the shader's (warn only; the bytes still flow)
+			if (Buffer.ElementLayout)
+			{
+				TSharedPtr<const FWebGPUTypeLayout> Element = Info.GetRuntimeArrayElement();
+				if (!Element && Info.Layout && Info.Layout->Kind == FWebGPUTypeLayout::EKind::Struct)
+				{
+					Element = Info.Layout;
+				}
+				FString Differences;
+				if (Element && Element->Kind == FWebGPUTypeLayout::EKind::Struct && !Buffer.ElementLayout->Matches(*Element, Differences))
+				{
+					WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': '%s' holds %s but the shader reads %s: %s"),
+						*Kernel.Label, *Info.Name, *Buffer.ElementLayout->GetStructName(), *Element->Name, *Differences));
+				}
+			}
+
+			WGPUBindGroupEntry& BindEntry = Groups.FindOrAdd((uint32)Info.Group).Add_GetRef(WGPU_BIND_GROUP_ENTRY_INIT);
+			BindEntry.binding = (uint32)Info.Binding;
+			BindEntry.buffer = Buffer.Handle;
+			BindEntry.offset = Bound.Offset;
+			BindEntry.size = Bound.Size;
+		}
+		if (Problems.Num() > 0)
+		{
+			WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s' not dispatched: %s"), *Kernel.Label, *FString::Join(Problems, TEXT("; "))));
+			return false;
+		}
+	}
+	else
+	{
+		// No reflection: bind exactly what was given
+		for (const TPair<uint64, const FWebGPUKernel::FBinding*>& Pair : Resolved)
+		{
+			const FWebGPUKernel::FBinding& Bound = *Pair.Value;
 			if (!Bound.Buffer || !Bound.Buffer->Handle)
 			{
-				UE_LOG(LogWebGPU, Warning, TEXT("Kernel '%s': binding @group(%u) @binding(%u) has no GPU buffer"), *Kernel.Label, Group.Key, Binding.Key);
-				Kernel.ReleaseBindGroups();
+				WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': a bound buffer has no GPU memory"), *Kernel.Label));
 				return false;
 			}
-			WGPUBindGroupEntry& Entry = Entries.Add_GetRef(WGPU_BIND_GROUP_ENTRY_INIT);
-			Entry.binding = Binding.Key;
-			Entry.buffer = Bound.Buffer->Handle;
-			Entry.offset = Bound.Offset;
-			Entry.size = Bound.Size;
+			WGPUBindGroupEntry& BindEntry = Groups.FindOrAdd((uint32)(Pair.Key >> 32)).Add_GetRef(WGPU_BIND_GROUP_ENTRY_INIT);
+			BindEntry.binding = (uint32)(Pair.Key & 0xffffffff);
+			BindEntry.buffer = Bound.Buffer->Handle;
+			BindEntry.offset = Bound.Offset;
+			BindEntry.size = Bound.Size;
 		}
+	}
 
+	for (const TPair<uint32, TArray<WGPUBindGroupEntry>>& Group : Groups)
+	{
 		WGPUBindGroupLayout Layout = wgpuComputePipelineGetBindGroupLayout(Kernel.Pipeline, Group.Key);
 		WGPUBindGroupDescriptor Desc = {};
 		Desc.layout = Layout;
-		Desc.entryCount = Entries.Num();
-		Desc.entries = Entries.GetData();
+		Desc.entryCount = Group.Value.Num();
+		Desc.entries = Group.Value.GetData();
 		Kernel.BindGroups.Add(Group.Key, wgpuDeviceCreateBindGroup(WorkerDevice->GetDevice(), &Desc));
 		wgpuBindGroupLayoutRelease(Layout);
 	}
-	Kernel.bBindGroupsDirty = false;
+	Kernel.bBindingsValid = true;
 	return true;
 }
 
