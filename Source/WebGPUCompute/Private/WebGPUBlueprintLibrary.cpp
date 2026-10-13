@@ -1,6 +1,7 @@
 // Copyright 2025-current Getnamo. All Rights Reserved.
 
 #include "WebGPUBlueprintLibrary.h"
+#include "WebGPUBindings.h"
 #include "WebGPUBuffer.h"
 #include "WebGPUCompute.h"
 #include "WebGPUContext.h"
@@ -10,6 +11,7 @@
 #include "WebGPUSubsystem.h"
 #include "WebGPUTexture.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "Misc/Paths.h"
 #include "RenderingThread.h"
 #include "TextureResource.h"
 
@@ -68,6 +70,35 @@ UWebGPUKernel* UWebGPUBlueprintLibrary::CreateWebGPUKernel(const FString& Source
 	Desc.EntryPoint = EntryPoint;
 	Desc.Label = Label;
 	return MakeKernel(Desc);
+}
+
+UWebGPUKernel* UWebGPUBlueprintLibrary::CreateWebGPUKernelFromFile(const FString& Path, const FString& EntryPoint, UWebGPUBindings* Bindings, bool bHotReload, const FString& Label)
+{
+	FWebGPUKernelDesc Desc;
+	Desc.SourceFile = Path;
+	Desc.bHotReload = bHotReload;
+	Desc.EntryPoint = EntryPoint;
+	Desc.Label = Label.IsEmpty() ? FString::Printf(TEXT("%s (%s)"), *FPaths::GetBaseFilename(Path), *EntryPoint) : Label;
+	Desc.Bindings = Bindings ? Bindings->GetNative() : nullptr;
+	UWebGPUKernel* Kernel = MakeKernel(Desc);
+	if (Kernel && Bindings)
+	{
+		// Keeps the UObject side alive with the kernel (the native set already is)
+		Kernel->SetBindings(Bindings);
+	}
+	return Kernel;
+}
+
+UWebGPUBindings* UWebGPUBlueprintLibrary::CreateWebGPUBindings(const FString& Label)
+{
+	TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
+	if (!Context)
+	{
+		return nullptr;
+	}
+	UWebGPUBindings* Bindings = NewObject<UWebGPUBindings>();
+	Bindings->Initialize(Context->CreateBindingSet(Label));
+	return Bindings;
 }
 
 UWebGPUKernel* UWebGPUBlueprintLibrary::CreateWebGPUKernelWithStructs(const FString& Source, const TArray<UScriptStruct*>& Structs, const FString& EntryPoint, const FString& Label)

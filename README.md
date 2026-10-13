@@ -87,7 +87,7 @@ Blueprint: **Create WebGPU Readback Stream (For Buffer)**, **Capture**, **Read B
 
 `CreateTexture(Width, Height, Format, Usage)` makes a 2D texture. Bind it by WGSL name with `SetTextureByName` (`texture_2d` or `texture_storage_2d`) and choose built-in samplers with `SetSamplerByName`; sampler bindings left unset use linear clamp. `WriteTexture` and `ReadTexture` take tightly packed rows, and readback streams can `CaptureTexture`. Texture bindings are checked against the shader (2D only, storage format, usage). Anything WebGPU itself rejects, such as sampling an unfilterable format, skips that kernel with WebGPU's message rather than failing the batch.
 
-On the D3D12 RHI, UE render targets can be shared without copies: `ImportTexture(FRHITexture*)` in C++, or **Create WebGPU Texture From Render Target** in Blueprint. The render target needs **Shared** enabled, plus **Can Create UAV** for kernels that write it. Use a shared texture between `BeginTextureAccess` and `EndTextureAccess`, called on the game thread:
+On the D3D12 RHI, UE render targets can be shared without copies: `ImportTexture(FRHITexture*)` in C++, or **Create WebGPU Texture From Render Target** in Blueprint. The render target needs **Shared** enabled, plus **Supports UAV** for kernels that write it. Use a shared texture between `BeginTextureAccess` and `EndTextureAccess`, called on the game thread:
 
 ```cpp
 Context->BeginTextureAccess(Camera);   // WebGPU sees UE's rendering enqueued so far
@@ -112,6 +112,35 @@ Blueprint: **Create WebGPU Texture**, **Create WebGPU Texture From Render Target
   - **Set Kernel Source** swaps the kernel during playback; the old one plays until the new one compiles.
   - **Get Kernel** binds extra inputs, such as a voices buffer.
   - In C++ the same generator is `FWebGPUAudioGenerator`, usable from any audio callback.
+
+### Shader files and hot reload
+
+Kernels can come from `.wgsl` files that recompile when you save them, while the game runs:
+
+- **Create WebGPU Kernel From File** (or `FWebGPUKernelDesc::SourceFile` with `bHotReload`). Paths are content style (`/Game/Shaders/crowd.wgsl` is `Content/Shaders/crowd.wgsl`; `/PluginName/...` is that plugin's `Content` folder), absolute, or relative to the project.
+- `#include "common.wgsl"` on its own line pastes in another file, relative to the including file. Each file is pasted once per kernel, so several files can include the same declarations. Saving an included file reloads every kernel that uses it.
+- Compile errors name the file and line they come from (`army_behavior.wgsl:15:25: error: ...`). An edit that doesn't compile is reported in the log and on screen, and the last good version keeps running.
+- Files are checked every `webgpu.HotReloadInterval` seconds (0.25 by default) and reloaded once a save has settled. File times have one-second precision, so recent files are also compared by content.
+
+### Shared bindings
+
+**Create WebGPU Bindings** gives several kernels one set of named resources: a kernel created with them takes every binding it doesn't set itself from the set, by WGSL name. One **Create Buffer** `"agents"` serves every kernel that declares `var<storage> agents`.
+
+The set also writes uniforms by member name: **Set Float** `"params.dt"` writes member `dt` of `var<uniform> params`. The values are packed with the layout each shader declares, so adding or reordering members during a hot reload keeps every value in its member.
+
+**Dispatch For Count** has a **Repeat** input for iterative kernels (relaxation, solvers), where each pass sees the previous one's writes.
+
+### Example: a hot-reloadable army
+
+`Content/Examples/Army` (map **ArmyExample**, D3D12) runs 131,072 agents in two armies that march across a field of obstacles and back. It's built entirely in Blueprint (`BP_WebGPUArmy`); the behavior lives in three `.wgsl` files next to it:
+
+- `army_field.wgsl`: per goal, a flow field (the shortest way around every obstacle) relaxed many times a frame on the GPU. The floor shows its contour lines.
+- `army_behavior.wgsl`: how each agent steers (flow, separation, wander), moves and draws itself. **Edit it while the example plays**: the army changes within half a second.
+- `army_common.wgsl`: the declarations both include.
+
+Obstacles are whatever stands on the floor: a scene capture renders depth from above into a shared render target that the kernels read, so moving a block (also while playing) reroutes the army. Press **R** to respawn.
+
+The Blueprint, map and render targets are generated from `Tools/Examples/army_example.json` with [BlueprintOracle](https://github.com/getnamo/BlueprintOracle-Unreal) (`-run=BlueprintOracle -migrate -spec=... -commit`).
 
 See https://github.com/getnamo/WebGPUCompute-Unreal/issues/1 for tracking on initial usable build.
 

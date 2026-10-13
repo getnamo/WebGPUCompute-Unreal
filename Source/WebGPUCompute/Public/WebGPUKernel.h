@@ -7,14 +7,16 @@
 #include "WebGPUContext.h"
 #include "WebGPUKernel.generated.h"
 
+class UWebGPUBindings;
 class UWebGPUBuffer;
 class UWebGPUTexture;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FWebGPUKernelCompiledSignature, bool, bSuccess, const FString&, Messages);
 
 /**
- * A WGSL compute kernel (create with UWebGPUBlueprintLibrary::CreateWebGPUKernel). Compiles asynchronously;
- * Recompile keeps the last good pipeline running until the new source compiles.
+ * A WGSL compute kernel (create with UWebGPUBlueprintLibrary::CreateWebGPUKernel, or CreateWebGPUKernelFromFile
+ * for a .wgsl file that hot reloads). Compiles asynchronously; Recompile and reloads keep the last good
+ * pipeline running until the new source compiles.
  */
 UCLASS(BlueprintType)
 class WEBGPUCOMPUTE_API UWebGPUKernel : public UObject
@@ -42,9 +44,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
 	void SetSamplerByName(const FString& Name, EWebGPUSampler Sampler);
 
-	/** Dispatches enough workgroups to cover X*Y*Z invocations, using the shader's @workgroup_size. */
+	/**
+	 * Dispatches enough workgroups to cover X*Y*Z invocations, using the shader's @workgroup_size. Repeat runs
+	 * it that many times in a row, each seeing the previous one's writes (iterative solvers, relaxation).
+	 */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
-	void DispatchForCount(int32 X, int32 Y = 1, int32 Z = 1);
+	void DispatchForCount(int32 X, int32 Y = 1, int32 Z = 1, int32 Repeat = 1);
+
+	/** Takes every binding this kernel doesn't set itself from Bindings, by name. None detaches them. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	void SetBindings(UWebGPUBindings* InBindings);
+
+	/** The .wgsl file the kernel was created from, as given (empty for source strings). */
+	UFUNCTION(BlueprintPure, Category = "WebGPU")
+	FString GetSourceFile() const;
+
+	/** Kernels from files: recompile when the file or one it includes changes on disk. */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	void SetHotReload(bool bEnabled);
+
+	UFUNCTION(BlueprintPure, Category = "WebGPU")
+	bool IsHotReloading() const;
 
 	/** Resources the entry point uses (from the last successful compile). */
 	UFUNCTION(BlueprintPure, Category = "WebGPU")
@@ -58,9 +78,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "WebGPU")
 	FString GetCompiledSource() const;
 
-	/** Workgroup counts per dimension. Skipped until the kernel has compiled once. */
+	/** Workgroup counts per dimension, Repeat times in a row. Skipped until the kernel has compiled once. */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
-	void Dispatch(int32 X, int32 Y = 1, int32 Z = 1);
+	void Dispatch(int32 X, int32 Y = 1, int32 Z = 1, int32 Repeat = 1);
 
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
 	void Recompile(const FString& Source);
@@ -97,4 +117,7 @@ private:
 	TSharedPtr<FWebGPUContext> GetContext() const;
 
 	TSharedPtr<FWebGPUKernel> Native;
+
+	UPROPERTY()
+	TObjectPtr<UWebGPUBindings> Bindings;
 };

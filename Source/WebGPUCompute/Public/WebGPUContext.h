@@ -5,9 +5,11 @@
 #include "CoreMinimal.h"
 #include "HAL/Runnable.h"
 #include "Containers/Queue.h"
+#include "Containers/Ticker.h"
 #include "webgpu/webgpu.h"
 #include "WebGPUDevice.h"
 #include "WebGPUReflection.h"
+#include "WebGPUShaderFiles.h"
 #include "WebGPUStructLayout.h"
 #include "WebGPUTypes.h"
 #include <atomic>
@@ -106,6 +108,71 @@ private:
 	bool bAccessing = false;
 };
 
+/** One resource bound to a kernel: a buffer range, a texture, or a built-in sampler. */
+struct FWebGPUResourceBinding
+{
+	TSharedPtr<FWebGPUBuffer> Buffer;
+	uint64 Offset = 0;
+	uint64 Size = WGPU_WHOLE_SIZE;
+	TSharedPtr<FWebGPUTexture> Texture;
+	TOptional<EWebGPUSampler> Sampler;
+};
+
+/** A value for a uniform member set by name on a binding set (FWebGPUContext::SetUniformValue). */
+struct FWebGPUUniformValue
+{
+	enum class EType : uint8
+	{
+		Float,
+		Int,
+		Vector,
+	};
+
+	EType Type = EType::Float;
+	/** Float and Int values are in X. Vectors fill as many components as the member has. */
+	FVector4f Floats = FVector4f(0.f, 0.f, 0.f, 0.f);
+	FIntVector4 Ints = FIntVector4(0, 0, 0, 0);
+
+	static FWebGPUUniformValue Float(float Value) { FWebGPUUniformValue Result; Result.Floats.X = Value; return Result; }
+	static FWebGPUUniformValue Int(int32 Value) { FWebGPUUniformValue Result; Result.Type = EType::Int; Result.Ints.X = Value; return Result; }
+	static FWebGPUUniformValue Vector(const FVector4f& Value) { FWebGPUUniformValue Result; Result.Type = EType::Vector; Result.Floats = Value; return Result; }
+};
+
+/**
+ * Named resources shared by kernels (FWebGPUContext::CreateBindingSet). A kernel that uses a binding set
+ * takes every binding it doesn't set itself from the set, by WGSL variable name. The set can also own
+ * uniform buffers whose members are set by name ("params.dt"); they are packed with the layout the
+ * kernel's shader declares, so editing that struct (hot reload) keeps each value in its member.
+ */
+class WEBGPUCOMPUTE_API FWebGPUBindingSet
+{
+public:
+	const FString& GetLabel() const { return Label; }
+	TSharedPtr<FWebGPUContext> GetContext() const { return Context.Pin(); }
+
+private:
+	friend class FWebGPUContext;
+	friend class FWebGPUKernel;
+
+	/** A uniform buffer owned by the set, written from its values whenever they or the layout change. */
+	struct FUniformBlock
+	{
+		TMap<FString, FWebGPUUniformValue> Values;
+		FWebGPUResourceBinding Binding;
+		TArray<uint8> Uploaded;
+		uint32 UploadedGeneration = 0;
+	};
+
+	TWeakPtr<FWebGPUContext> Context;
+	FString Label;
+
+	// Worker thread only
+	TMap<FString, FWebGPUResourceBinding> Named;
+	TMap<FString, TSharedPtr<FUniformBlock>> Uniforms;
+	/** Bumped when a resource changes, so kernels rebuild their bind groups. */
+	uint32 Version = 1;
+};
+
 /**
  * A compute pipeline plus its bindings. Create it with FWebGPUContext::CreateKernel.
  * Compiles asynchronously; a recompile keeps the last good pipeline until the new one succeeds.
@@ -121,8 +188,11 @@ public:
 	/** True once a pipeline compiled successfully (stays true while a recompile is pending or failed). */
 	bool IsReady() const { return bReady; }
 
-	/** Errors and warnings from the most recent compile (lines are relative to the source, after the preamble). */
+	/** Errors and warnings from the most recent compile (lines are relative to the source, after the preamble; File is set for .wgsl files). */
 	TArray<FWebGPUCompileMessage> GetMessages() const;
+
+	/** The .wgsl file the kernel was created from (FWebGPUKernelDesc::SourceFile), as given; empty for source strings. */
+	const FString& GetSourceFile() const { return SourceFile; }
 
 	/** Bindings, workgroup size and structs of the last successful compile; null before one. */
 	TSharedPtr<const FWebGPUShaderReflection> GetReflection() const;
@@ -143,19 +213,12 @@ public:
 private:
 	friend class FWebGPUContext;
 
-	/** One resource: a buffer range, a texture, or a built-in sampler. */
-	struct FBinding
-	{
-		TSharedPtr<FWebGPUBuffer> Buffer;
-		uint64 Offset = 0;
-		uint64 Size = WGPU_WHOLE_SIZE;
-		TSharedPtr<FWebGPUTexture> Texture;
-		TOptional<EWebGPUSampler> Sampler;
-	};
+	using FBinding = FWebGPUResourceBinding;
 
 	TWeakPtr<FWebGPUContext> Context;
 	FString Label;
 	FString EntryPoint;
+	FString SourceFile;
 	FString Preamble;
 	int32 PreambleLines = 0;
 	std::atomic<bool> bReady = false;
@@ -169,6 +232,12 @@ private:
 
 	// Worker thread only
 	FString Source;
+	/** Lines of Source -> .wgsl files and lines (null for source strings). */
+	TSharedPtr<const FWebGPUSourceMap> SourceMap;
+	TSharedPtr<FWebGPUBindingSet> BindingSet;
+	uint32 BindingSetVersion = 0;
+	/** Uniform bindings the binding set provides for the current bind groups: written before each dispatch when their values change. */
+	TArray<TPair<const FWebGPUBindingInfo*, FWebGPUBindingSet::FUniformBlock*>> SetUniforms;
 	TSharedPtr<const FWebGPUShaderReflection> WorkerReflection;
 	const FWebGPUEntryPointInfo* EntryInfo = nullptr;
 	WGPUComputePipeline Pipeline = nullptr;
@@ -176,6 +245,8 @@ private:
 	uint32 AppliedSerial = 0;
 	bool bProfile = false;
 	bool bWarnedNotReady = false;
+	/** The latest compile failed (vs. still compiling): skipped dispatches warn. */
+	bool bCompileFailed = false;
 	FWebGPUCompileCallback Listener;
 	EWebGPUCallbackThread ListenerThread = EWebGPUCallbackThread::GameThread;
 	TSortedMap<uint32, TSortedMap<uint32, FBinding>> Bindings;
@@ -202,6 +273,22 @@ struct FWebGPUKernelDesc
 
 	/** UStructs declared as WGSL structs (storage layout) in a preamble before the source, so shaders can use them by name. */
 	TArray<const UScriptStruct*> Structs;
+
+	/**
+	 * A .wgsl file to compile instead of Source, with #include support (see FWebGPUShaderFiles for path
+	 * forms). Compile messages name the file and line.
+	 */
+	FString SourceFile;
+
+	/**
+	 * SourceFile: recompile when the file, or a file it includes, changes on disk. The last good pipeline
+	 * keeps running while an edit doesn't compile. Files are polled on the game thread
+	 * (webgpu.HotReloadInterval seconds), or call FWebGPUContext::PollShaderFiles.
+	 */
+	bool bHotReload = false;
+
+	/** Named resources and uniform values shared with other kernels (FWebGPUContext::CreateBindingSet). */
+	TSharedPtr<FWebGPUBindingSet> Bindings;
 };
 
 /**
@@ -242,6 +329,44 @@ public:
 	/** Compiles new source (the preamble is kept). The previous pipeline keeps running until the new one succeeds. OnCompiled fires once (the listener fires too). */
 	void RecompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, const FString& Source,
 		FWebGPUCompileCallback OnCompiled = nullptr, EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
+
+	/** Same, from a loaded .wgsl file. A source with Errors (a missing include, ...) fails the compile with them and changes nothing. */
+	void RecompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, const FWebGPUShaderSource& Source,
+		FWebGPUCompileCallback OnCompiled = nullptr, EWebGPUCallbackThread CallbackThread = EWebGPUCallbackThread::GameThread);
+
+	/**
+	 * Hot reload: recompiles every watched kernel (FWebGPUKernelDesc::bHotReload) whose file, or a file it
+	 * includes, changed and has stayed unchanged since the previous poll (so half-written saves are skipped).
+	 * Runs on the game thread every webgpu.HotReloadInterval seconds; call it directly to poll now. Returns
+	 * the number of kernels it started recompiling.
+	 */
+	int32 PollShaderFiles();
+
+	/** Starts or stops watching a kernel created from a file. */
+	void SetHotReload(const TSharedRef<FWebGPUKernel>& Kernel, bool bEnabled);
+	bool IsHotReloading(const TSharedRef<FWebGPUKernel>& Kernel) const;
+
+	// Binding sets (any thread)
+
+	/** Named resources and uniform values shared by kernels (see FWebGPUBindingSet). */
+	TSharedRef<FWebGPUBindingSet> CreateBindingSet(const FString& Label = FString());
+
+	/** Makes the kernel take unset bindings from the set (null detaches it). */
+	void SetKernelBindingSet(const TSharedRef<FWebGPUKernel>& Kernel, const TSharedPtr<FWebGPUBindingSet>& Set);
+
+	/** A buffer for every kernel of the set that uses a binding of this name. Null removes it. */
+	void SetSharedBuffer(const TSharedRef<FWebGPUBindingSet>& Set, const FString& Name, const TSharedPtr<FWebGPUBuffer>& Buffer,
+		uint64 Offset = 0, uint64 Size = WGPU_WHOLE_SIZE);
+	void SetSharedTexture(const TSharedRef<FWebGPUBindingSet>& Set, const FString& Name, const TSharedPtr<FWebGPUTexture>& Texture);
+	void SetSharedSampler(const TSharedRef<FWebGPUBindingSet>& Set, const FString& Name, EWebGPUSampler Sampler);
+
+	/**
+	 * A value for a member of a var<uniform> struct, by path: "params.dt" is member dt of the uniform binding
+	 * named params ("speed" alone is a scalar uniform named speed). The set owns that uniform buffer and
+	 * writes it, packed with the reflected layout, before dispatches whenever a value or the layout changed.
+	 * Floats convert to i32/u32 members and back; a vector fills as many components as the member has.
+	 */
+	void SetUniformValue(const TSharedRef<FWebGPUBindingSet>& Set, const FString& Path, const FWebGPUUniformValue& Value);
 
 	/** A 2D texture (zeroed). Storage use needs a WGSL storage format (see EWebGPUTextureFormat). */
 	TSharedRef<FWebGPUTexture> CreateTexture(uint32 Width, uint32 Height, EWebGPUTextureFormat Format,
@@ -404,6 +529,10 @@ private:
 	void FinishCompile(FWebGPUKernel& Kernel, bool bSuccess, const TArray<FWebGPUCompileMessage>& Messages, FWebGPUCompileCallback&& OnCompiled, EWebGPUCallbackThread CallbackThread);
 	void EncodeDispatch(const TSharedRef<FWebGPUKernel>& Kernel, uint32 X, uint32 Y, uint32 Z);
 	bool UpdateBindGroups(FWebGPUKernel& Kernel);
+	/** Writes the set-owned uniform buffers this kernel uses when their packed bytes changed. */
+	void UploadSetUniforms(FWebGPUKernel& Kernel);
+	FWebGPUBindingSet::FUniformBlock* GetUniformBlock(FWebGPUKernel& Kernel, FWebGPUBindingSet& Set, const FWebGPUBindingInfo& Info);
+	void WatchKernelFile(const TSharedRef<FWebGPUKernel>& Kernel, const FWebGPUShaderSource& Source);
 	void WarnOnce(FWebGPUKernel& Kernel, const FString& Message);
 	void ReadBufferOnWorker(FWebGPUBuffer& Buffer, uint64 Offset, uint64 Size, FWebGPUReadCallback&& Callback, EWebGPUCallbackThread CallbackThread);
 	void UploadOnWorker(FWebGPUBuffer& Buffer, uint64 Offset, const void* Data, uint64 Size);
@@ -492,6 +621,29 @@ private:
 	WGPUBuffer TimestampResolve = nullptr;
 	uint32 BatchQueryCount = 0;
 	TArray<TWeakPtr<FWebGPUKernel>> BatchProfiled;
+
+	/** Kernels compiled from files and watched for changes (hot reload). */
+	/** A file as last seen: its time, plus a hash of its text while the time is too recent to tell saves apart (one second precision). */
+	struct FFileSignature
+	{
+		FDateTime Time;
+		uint32 Hash = 0;
+		bool bHashed = false;
+
+		bool SameAs(const FFileSignature& Other) const { return Time == Other.Time && (!bHashed || !Other.bHashed || Hash == Other.Hash); }
+	};
+	struct FWatchedKernel
+	{
+		TWeakPtr<FWebGPUKernel> Kernel;
+		TArray<FString> Files;
+		/** The files as the kernel's source was read from them. */
+		TArray<FFileSignature> Read;
+		/** As seen changed on the last poll: reloaded once they stay the same for a poll. */
+		TArray<FFileSignature> Pending;
+	};
+	mutable FCriticalSection WatchLock;
+	TArray<FWatchedKernel> WatchedKernels;
+	FTSTicker::FDelegateHandle WatchTicker;
 
 	// Stats
 	std::atomic<int64> StatSubmits = 0;

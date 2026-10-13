@@ -27,6 +27,8 @@ struct FWebGPUCompileMessage
 	FString Message;
 	uint64 Line = 0;
 	uint64 Column = 0;
+	/** Kernels from .wgsl files: the file the line is in (absolute path). Empty for source strings. */
+	FString File;
 };
 
 /**

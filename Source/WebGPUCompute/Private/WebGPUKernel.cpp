@@ -1,6 +1,7 @@
 // Copyright 2025-current Getnamo. All Rights Reserved.
 
 #include "WebGPUKernel.h"
+#include "WebGPUBindings.h"
 #include "WebGPUBuffer.h"
 #include "WebGPUCompute.h"
 #include "WebGPUTexture.h"
@@ -18,7 +19,7 @@ void UWebGPUKernel::SetBuffer(int32 Binding, UWebGPUBuffer* Buffer, int32 Group)
 	}
 }
 
-void UWebGPUKernel::Dispatch(int32 X, int32 Y, int32 Z)
+void UWebGPUKernel::Dispatch(int32 X, int32 Y, int32 Z, int32 Repeat)
 {
 	if (X <= 0 || Y <= 0 || Z <= 0)
 	{
@@ -26,7 +27,10 @@ void UWebGPUKernel::Dispatch(int32 X, int32 Y, int32 Z)
 	}
 	if (TSharedPtr<FWebGPUContext> Context = GetContext())
 	{
-		Context->Dispatch(Native.ToSharedRef(), (uint32)X, (uint32)Y, (uint32)Z);
+		for (int32 Pass = 0; Pass < Repeat; Pass++)
+		{
+			Context->Dispatch(Native.ToSharedRef(), (uint32)X, (uint32)Y, (uint32)Z);
+		}
 	}
 }
 
@@ -54,7 +58,7 @@ void UWebGPUKernel::SetSamplerByName(const FString& Name, EWebGPUSampler Sampler
 	}
 }
 
-void UWebGPUKernel::DispatchForCount(int32 X, int32 Y, int32 Z)
+void UWebGPUKernel::DispatchForCount(int32 X, int32 Y, int32 Z, int32 Repeat)
 {
 	if (X <= 0 || Y <= 0 || Z <= 0)
 	{
@@ -62,8 +66,39 @@ void UWebGPUKernel::DispatchForCount(int32 X, int32 Y, int32 Z)
 	}
 	if (TSharedPtr<FWebGPUContext> Context = GetContext())
 	{
-		Context->DispatchForCount(Native.ToSharedRef(), (uint32)X, (uint32)Y, (uint32)Z);
+		for (int32 Pass = 0; Pass < Repeat; Pass++)
+		{
+			Context->DispatchForCount(Native.ToSharedRef(), (uint32)X, (uint32)Y, (uint32)Z);
+		}
 	}
+}
+
+void UWebGPUKernel::SetBindings(UWebGPUBindings* InBindings)
+{
+	if (TSharedPtr<FWebGPUContext> Context = GetContext())
+	{
+		Context->SetKernelBindingSet(Native.ToSharedRef(), InBindings ? InBindings->GetNative() : nullptr);
+		Bindings = InBindings;
+	}
+}
+
+FString UWebGPUKernel::GetSourceFile() const
+{
+	return Native ? Native->GetSourceFile() : FString();
+}
+
+void UWebGPUKernel::SetHotReload(bool bEnabled)
+{
+	if (TSharedPtr<FWebGPUContext> Context = GetContext())
+	{
+		Context->SetHotReload(Native.ToSharedRef(), bEnabled);
+	}
+}
+
+bool UWebGPUKernel::IsHotReloading() const
+{
+	TSharedPtr<FWebGPUContext> Context = GetContext();
+	return Context && Context->IsHotReloading(Native.ToSharedRef());
 }
 
 TArray<FWebGPUBindingInfo> UWebGPUKernel::GetBindings() const

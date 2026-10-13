@@ -10,6 +10,7 @@
 #include "WebGPUTypes.h"
 #include "WebGPUBlueprintLibrary.generated.h"
 
+class UWebGPUBindings;
 class UWebGPUBuffer;
 class UWebGPUKernel;
 class UWebGPUReadbackStream;
@@ -32,6 +33,21 @@ public:
 	/** Compiles WGSL asynchronously; bind OnCompiled or poll IsReady. Null if WebGPU is unavailable. */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU")
 	static UWebGPUKernel* CreateWebGPUKernel(const FString& Source, const FString& EntryPoint = TEXT("main"), const FString& Label = TEXT(""));
+
+	/**
+	 * Compiles a .wgsl file: absolute, content style ("/Game/Shaders/crowd.wgsl" = Content/Shaders/crowd.wgsl,
+	 * "/PluginName/..." = that plugin's Content folder) or relative to the project. `#include "other.wgsl"`
+	 * lines paste other files in (relative to the including file). With Hot Reload the kernel recompiles when
+	 * the file or an include changes; an edit that doesn't compile is reported (log, on screen) and the last
+	 * good version keeps running. Bindings: shared named resources for every binding the kernel doesn't set.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	static UWebGPUKernel* CreateWebGPUKernelFromFile(const FString& Path, const FString& EntryPoint = TEXT("main"), UWebGPUBindings* Bindings = nullptr,
+		bool bHotReload = true, const FString& Label = TEXT(""));
+
+	/** Buffers, textures and uniform values shared by kernels by WGSL name (see UWebGPUBindings). */
+	UFUNCTION(BlueprintCallable, Category = "WebGPU")
+	static UWebGPUBindings* CreateWebGPUBindings(const FString& Label = TEXT(""));
 
 	/** Workgroup count that covers Count items: ceil(Count / WorkgroupSize). */
 	UFUNCTION(BlueprintPure, Category = "WebGPU")
@@ -79,7 +95,7 @@ public:
 
 	/**
 	 * Shares a render target with kernels without copies (D3D12 RHI). The render target needs Shared
-	 * (bGPUSharedFlag) set, plus Can Create UAV for kernels that write it. Use the texture between its
+	 * (bGPUSharedFlag) set, plus Supports UAV for kernels that write it. Use the texture between its
 	 * Begin Access and End Access. Null (with a warning) when it can't be shared.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "WebGPU|Texture")

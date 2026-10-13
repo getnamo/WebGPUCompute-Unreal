@@ -32,6 +32,12 @@ public class WebGPUCompute : ModuleRules
 			}
 			);
 
+		if (Target.bBuildEditor)
+		{
+			// The example map's play test (PIE)
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
+
 		// Dawn (WebGPU), built from source by Tools/BuildDawn.ps1
 		PublicIncludePaths.Add(Path.Combine(DawnPath, "include"));
 

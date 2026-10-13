@@ -58,7 +58,16 @@ FString FWebGPUDevice::FormatCompileMessages(const TArray<FWebGPUCompileMessage>
 	FString Result;
 	for (const FWebGPUCompileMessage& Message : Messages)
 	{
-		Result += FString::Printf(TEXT("%s:%llu:%llu: %s\n"), Message.bIsError ? TEXT("error") : TEXT("warning"), Message.Line, Message.Column, *Message.Message);
+		const TCHAR* Kind = Message.bIsError ? TEXT("error") : TEXT("warning");
+		if (Message.File.IsEmpty())
+		{
+			Result += FString::Printf(TEXT("%s:%llu:%llu: %s\n"), Kind, Message.Line, Message.Column, *Message.Message);
+		}
+		else
+		{
+			// Compiler style, so editors and terminals can jump to the line
+			Result += FString::Printf(TEXT("%s:%llu:%llu: %s: %s\n"), *Message.File, Message.Line, Message.Column, Kind, *Message.Message);
+		}
 	}
 	return Result;
 }

@@ -208,6 +208,7 @@ void FWebGPUKernel::ReleaseBindGroups()
 		wgpuBindGroupRelease(Pair.Value);
 	}
 	BindGroups.Reset();
+	SetUniforms.Reset();
 	bBindGroupsDirty = true;
 }
 
@@ -308,6 +309,11 @@ bool FWebGPUContext::Start()
 
 void FWebGPUContext::Shutdown()
 {
+	if (WatchTicker.IsValid())
+	{
+		FTSTicker::RemoveTicker(WatchTicker);
+		WatchTicker.Reset();
+	}
 	if (!Thread)
 	{
 		return;
@@ -477,6 +483,19 @@ TSharedRef<FWebGPUKernel> FWebGPUContext::CreateKernel(const FWebGPUKernelDesc& 
 	Kernel->Context = AsShared();
 	Kernel->EntryPoint = Desc.EntryPoint;
 	Kernel->Label = Desc.Label.IsEmpty() ? Desc.EntryPoint : Desc.Label;
+	Kernel->SourceFile = Desc.SourceFile;
+
+	// .wgsl files are read (and their includes expanded) here; the watch starts before the compile
+	const bool bFromFile = !Desc.SourceFile.IsEmpty();
+	FWebGPUShaderSource FileSource;
+	if (bFromFile)
+	{
+		FileSource = FWebGPUShaderFiles::Load(Desc.SourceFile);
+		if (Desc.bHotReload)
+		{
+			WatchKernelFile(Kernel, FileSource);
+		}
+	}
 
 	// UStructs become WGSL declarations ahead of the source (built here: it reads UObject reflection)
 	if (Desc.Structs.Num() > 0)
@@ -501,12 +520,27 @@ TSharedRef<FWebGPUKernel> FWebGPUContext::CreateKernel(const FWebGPUKernelDesc& 
 		}
 	}
 
-	Enqueue([this, Kernel, Source = Desc.Source, OnCompiled = MoveTemp(OnCompiled), CallbackThread]() mutable
+	Enqueue([this, Kernel, Source = Desc.Source, bFromFile, FileSource = MoveTemp(FileSource), Bindings = Desc.Bindings, OnCompiled = MoveTemp(OnCompiled), CallbackThread]() mutable
 	{
 		LiveKernels.Add(Kernel);
-		Kernel->Source = Source;
 		Kernel->Listener = MoveTemp(OnCompiled);
 		Kernel->ListenerThread = CallbackThread;
+		Kernel->BindingSet = Bindings;
+		if (bFromFile)
+		{
+			if (!FileSource.IsValid())
+			{
+				// Missing file or include: reported like a compile error; a watched kernel compiles once it's fixed
+				FinishCompile(*Kernel, false, FileSource.Errors, nullptr, CallbackThread);
+				return;
+			}
+			Kernel->Source = MoveTemp(FileSource.Source);
+			Kernel->SourceMap = FileSource.Map;
+		}
+		else
+		{
+			Kernel->Source = Source;
+		}
 		CompileKernel(Kernel, nullptr, CallbackThread);
 	});
 	return Kernel;
@@ -518,6 +552,23 @@ void FWebGPUContext::RecompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, co
 	Enqueue([this, Kernel, Source, OnCompiled = MoveTemp(OnCompiled), CallbackThread]() mutable
 	{
 		Kernel->Source = Source;
+		Kernel->SourceMap.Reset();
+		CompileKernel(Kernel, MoveTemp(OnCompiled), CallbackThread);
+	});
+}
+
+void FWebGPUContext::RecompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, const FWebGPUShaderSource& Source,
+	FWebGPUCompileCallback OnCompiled, EWebGPUCallbackThread CallbackThread)
+{
+	Enqueue([this, Kernel, Source, OnCompiled = MoveTemp(OnCompiled), CallbackThread]() mutable
+	{
+		if (!Source.IsValid())
+		{
+			FinishCompile(*Kernel, false, Source.Errors, MoveTemp(OnCompiled), CallbackThread);
+			return;
+		}
+		Kernel->Source = Source.Source;
+		Kernel->SourceMap = Source.Map;
 		CompileKernel(Kernel, MoveTemp(OnCompiled), CallbackThread);
 	});
 }
@@ -809,6 +860,10 @@ void FWebGPUContext::CompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, FWeb
 	TArray<FWebGPUCompileMessage> Messages;
 	WGPUShaderModule Module = WorkerDevice->CreateShaderModule(FullSource, Kernel->Label, Messages);
 	RemapPreambleLines(Messages, Kernel->PreambleLines);
+	if (Kernel->SourceMap)
+	{
+		Kernel->SourceMap->Apply(Messages);
+	}
 	if (!Module)
 	{
 		FinishCompile(*Kernel, false, Messages, MoveTemp(OnCompiled), CallbackThread);
@@ -876,6 +931,11 @@ void FWebGPUContext::FinishCompile(FWebGPUKernel& Kernel, bool bSuccess, const T
 	FWebGPUCompileCallback&& OnCompiled, EWebGPUCallbackThread CallbackThread)
 {
 	Kernel.SetMessages(Messages);
+	Kernel.bCompileFailed = !bSuccess;
+	if (!bSuccess)
+	{
+		Kernel.bWarnedNotReady = false;
+	}
 	if (OnCompiled)
 	{
 		Deliver(CallbackThread, [Callback = MoveTemp(OnCompiled), bSuccess, Messages]()
@@ -962,6 +1022,11 @@ void FWebGPUContext::WarnOnce(FWebGPUKernel& Kernel, const FString& Message)
 
 bool FWebGPUContext::UpdateBindGroups(FWebGPUKernel& Kernel)
 {
+	FWebGPUBindingSet* Set = Kernel.BindingSet.Get();
+	if (Set && Kernel.BindingSetVersion != Set->Version)
+	{
+		Kernel.bBindGroupsDirty = true;
+	}
 	if (!Kernel.bBindGroupsDirty)
 	{
 		return Kernel.bBindingsValid;
@@ -1003,6 +1068,35 @@ bool FWebGPUContext::UpdateBindGroups(FWebGPUKernel& Kernel)
 			WarnOnce(Kernel, FString::Printf(TEXT("Kernel '%s': entry point '%s' uses no binding named '%s' (it uses: %s)"),
 				*Kernel.Label, *Entry->Name, *Named.Key, Names.Num() ? *FString::Join(Names, TEXT(", ")) : TEXT("none")));
 		}
+	}
+
+	// Whatever the kernel leaves unset comes from its binding set, by name
+	if (Set && Entry)
+	{
+		for (const FWebGPUBindingInfo& Info : Entry->Bindings)
+		{
+			const uint64 BindingKey = Key(Info.Group, Info.Binding);
+			if (Resolved.Contains(BindingKey))
+			{
+				continue;
+			}
+			if (const FWebGPUKernel::FBinding* Shared = Set->Named.Find(Info.Name))
+			{
+				Resolved.Add(BindingKey, Shared);
+			}
+			else if (Info.Type == EWebGPUBindingType::UniformBuffer)
+			{
+				if (FWebGPUBindingSet::FUniformBlock* Block = GetUniformBlock(Kernel, *Set, Info))
+				{
+					Resolved.Add(BindingKey, &Block->Binding);
+					Kernel.SetUniforms.Add({ &Info, Block });
+				}
+			}
+		}
+	}
+	if (Set)
+	{
+		Kernel.BindingSetVersion = Set->Version;
 	}
 
 	TSortedMap<uint32, TArray<WGPUBindGroupEntry>> Groups;
@@ -1190,7 +1284,15 @@ void FWebGPUContext::EncodeDispatch(const TSharedRef<FWebGPUKernel>& KernelRef, 
 		StatSkippedDispatches++;
 		if (!Kernel.bWarnedNotReady)
 		{
-			UE_LOG(LogWebGPU, Warning, TEXT("Dispatch of '%s' skipped: no compiled pipeline yet"), *Kernel.Label);
+			// Dispatching while the first compile is in flight is normal (kernels compile asynchronously)
+			if (Kernel.bCompileFailed)
+			{
+				UE_LOG(LogWebGPU, Warning, TEXT("Dispatch of '%s' skipped: no compiled pipeline (its compile failed)"), *Kernel.Label);
+			}
+			else
+			{
+				UE_LOG(LogWebGPU, Log, TEXT("Dispatch of '%s' skipped: no compiled pipeline yet (still compiling)"), *Kernel.Label);
+			}
 			Kernel.bWarnedNotReady = true;
 		}
 		return;
@@ -1213,6 +1315,13 @@ void FWebGPUContext::EncodeDispatch(const TSharedRef<FWebGPUKernel>& KernelRef, 
 				*Kernel.Label, *Texture->GetLabel()));
 			return;
 		}
+	}
+
+	// Values of set-owned uniforms land in the batch ahead of the pass (an upload may have to submit, so fetch the encoder again)
+	if (Kernel.SetUniforms.Num() > 0)
+	{
+		UploadSetUniforms(Kernel);
+		BatchEncoder = GetEncoder();
 	}
 
 	FTCHARToUTF8 Label(*Kernel.Label);
