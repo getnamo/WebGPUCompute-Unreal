@@ -72,3 +72,7 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+# Fetched by Tools/FetchDawn.ps1
+ThirdParty/Dawn/
+ThirdParty/.downloads/

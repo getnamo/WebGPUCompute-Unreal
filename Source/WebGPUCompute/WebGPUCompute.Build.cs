@@ -5,84 +5,55 @@ using UnrealBuildTool;
 
 public class WebGPUCompute : ModuleRules
 {
-	private string WebGpuThirdPartyPath
+	private string DawnPath
 	{
-		get { return Path.GetFullPath(Path.Combine(ModuleDirectory, "../../ThirdParty/WebGPU")); }
-	}
-
-	private string WebGpuIncludePath
-	{
-		get { return Path.GetFullPath(Path.Combine(WebGpuThirdPartyPath,  "Include")); }
-	}
-
-	private string WebGpuLibPath
-	{
-		get { return Path.GetFullPath(Path.Combine(WebGpuThirdPartyPath, "Lib")); }
-	}
-
-	private string WebGpuBinariesPath
-	{
-		get { return Path.GetFullPath(Path.Combine(WebGpuThirdPartyPath, "Binaries")); }
+		get { return Path.GetFullPath(Path.Combine(ModuleDirectory, "../../ThirdParty/Dawn")); }
 	}
 
 	public WebGPUCompute(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicIncludePaths.AddRange(
-			new string[] {
-				// ... add public include paths required here ...
-			}
-			);
-
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				// ... add other private include paths required here ...
-			}
-			);
-
-
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
 				"Core",
-				// ... add other public dependencies that you statically link with here ...
+				"CoreUObject",
+				"Engine",
 			}
 			);
-
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"CoreUObject",
-				"Engine",
-				"Slate",
-				"SlateCore",
-				// ... add private dependencies that you statically link with here ...	
+				"RHI",
+				"RenderCore",
 			}
 			);
 
-
-		DynamicallyLoadedModuleNames.AddRange(
-			new string[]
-			{
-				// ... add any modules that your module loads dynamically here ...
-			}
-			);
-
-		PublicIncludePaths.Add(WebGpuIncludePath);
+		// Dawn (WebGPU), fetched by Tools/FetchDawn.ps1
+		PublicIncludePaths.Add(Path.Combine(DawnPath, "include"));
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
-			string Win64LibPath = Path.Combine(WebGpuLibPath, "Win64");
-			string Win64BinariesPath = Path.Combine(WebGpuBinariesPath, "Win64");
+			string DawnLib = Path.Combine(DawnPath, "lib", "Win64", "webgpu_dawn.lib");
+			if (!File.Exists(DawnLib))
+			{
+				throw new BuildException("Dawn not found at " + DawnLib + ". Run Plugins/WebGPUCompute-Unreal/Tools/FetchDawn.ps1 first.");
+			}
 
-			//Add libs
-			PublicAdditionalLibraries.Add(Path.Combine(Win64LibPath, "wgpu_native.dll.lib"));
-			
-			//Add dlls (copy to plugin binaries)
-			RuntimeDependencies.Add("$(BinaryOutputDir)/wgpu_native.dll", Path.Combine(Win64BinariesPath, "wgpu_native.dll"));
+			// Static monolithic Dawn (/MD, _ITERATOR_DEBUG_LEVEL=0, matches UE)
+			PublicAdditionalLibraries.Add(DawnLib);
+			PublicSystemLibraries.AddRange(new string[] { "user32.lib", "dxguid.lib", "onecore_apiset.lib" });
+
+			// D3D12 interop: shared textures/fences between UE's D3D12 RHI and Dawn's D3D12 device
+			PrivateDependencyModuleNames.Add("D3D12RHI");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "DX12");
+			PublicDefinitions.Add("WITH_WEBGPU_D3D12_INTEROP=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_WEBGPU_D3D12_INTEROP=0");
 		}
 	}
 }

@@ -4,6 +4,8 @@
 
 #include "Modules/ModuleManager.h"
 
+WEBGPUCOMPUTE_API DECLARE_LOG_CATEGORY_EXTERN(LogWebGPU, Log, All);
+
 class FWebGPUComputeModule : public IModuleInterface
 {
 public:
