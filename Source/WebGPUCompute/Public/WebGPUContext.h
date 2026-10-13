@@ -204,8 +204,8 @@ public:
 	/** The kernel's entry point in GetReflection(). False before a successful compile. */
 	bool GetEntryPointInfo(FWebGPUEntryPointInfo& OutInfo) const;
 
-	/** WGSL generated from UStructs and prepended to the source (see FWebGPUKernelDesc::Structs). */
-	const FString& GetPreamble() const { return Preamble; }
+	/** WGSL generated from UStructs and prepended to the source of the most recent compile (see FWebGPUKernelDesc::Structs). */
+	FString GetPreamble() const;
 
 	/** Preamble plus the source of the most recent compile: what Dawn actually compiled. */
 	FString GetCompiledSource() const;
@@ -225,8 +225,9 @@ private:
 	FString SourceFile;
 	/** Counted in the context's live stats. */
 	bool bCounted = false;
+	/** Desc.Structs' layouts; their declarations are generated for each compile (they follow the source's spelling) */
+	TArray<TSharedPtr<const FWebGPUStructLayout>> StructLayouts;
 	FString Preamble;
-	int32 PreambleLines = 0;
 	std::atomic<bool> bReady = false;
 	std::atomic<double> LastGpuTimeMs = 0.0;
 	std::atomic<double> AverageGpuTimeMs = 0.0;

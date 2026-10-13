@@ -104,6 +104,95 @@ namespace
 	}
 }
 
+/** How a kernel's source spells its identifiers (comments skipped), keyed without case. */
+class FWebGPUSourceSpellings
+{
+public:
+	explicit FWebGPUSourceSpellings(const FString& Source)
+	{
+		const TCHAR* Text = *Source;
+		const int32 Length = Source.Len();
+		int32 Index = 0;
+		while (Index < Length)
+		{
+			if (Text[Index] == TEXT('/') && Index + 1 < Length && Text[Index + 1] == TEXT('/'))
+			{
+				while (Index < Length && Text[Index] != TEXT('\n'))
+				{
+					Index++;
+				}
+				continue;
+			}
+			if (Text[Index] == TEXT('/') && Index + 1 < Length && Text[Index + 1] == TEXT('*'))
+			{
+				// WGSL block comments nest
+				int32 Depth = 0;
+				do
+				{
+					if (Text[Index] == TEXT('/') && Index + 1 < Length && Text[Index + 1] == TEXT('*'))
+					{
+						Depth++;
+						Index += 2;
+					}
+					else if (Text[Index] == TEXT('*') && Index + 1 < Length && Text[Index + 1] == TEXT('/'))
+					{
+						Depth--;
+						Index += 2;
+					}
+					else
+					{
+						Index++;
+					}
+				} while (Depth > 0 && Index < Length);
+				continue;
+			}
+			if (FChar::IsAlpha(Text[Index]) || Text[Index] == TEXT('_'))
+			{
+				const int32 Start = Index;
+				while (Index < Length && (FChar::IsAlnum(Text[Index]) || Text[Index] == TEXT('_')))
+				{
+					Index++;
+				}
+				int32 Before = Start - 1;
+				while (Before >= 0 && FChar::IsWhitespace(Text[Before]))
+				{
+					Before--;
+				}
+				// FString keys compare without case: one entry per name, holding every spelling in source order
+				FString Word = FString::ConstructFromPtrSize(Text + Start, Index - Start);
+				TArray<FString>& Spellings = (Before >= 0 && Text[Before] == TEXT('.') ? Members : Others).FindOrAdd(Word);
+				if (!Spellings.ContainsByPredicate([&Word](const FString& Spelling) { return Spelling.Equals(Word, ESearchCase::CaseSensitive); }))
+				{
+					Spellings.Add(MoveTemp(Word));
+				}
+				continue;
+			}
+			Index++;
+		}
+	}
+
+	/** Name as the source spells it: unchanged when the source uses it as is (or not at all). Fields prefer member accesses. */
+	FString Spell(const FString& Name, bool bField) const
+	{
+		const TArray<FString>* Preferred = (bField ? Members : Others).Find(Name);
+		const TArray<FString>* Fallback = (bField ? Others : Members).Find(Name);
+		for (const TArray<FString>* Spellings : { Preferred, Fallback })
+		{
+			if (Spellings && Spellings->ContainsByPredicate([&Name](const FString& Spelling) { return Spelling.Equals(Name, ESearchCase::CaseSensitive); }))
+			{
+				return Name;
+			}
+		}
+		const TArray<FString>* Found = Preferred ? Preferred : Fallback;
+		return Found && Found->Num() > 0 ? (*Found)[0] : Name;
+	}
+
+private:
+	/** Identifiers right after a '.', and all the others */
+	TMap<FString, TArray<FString>> Members;
+	TMap<FString, TArray<FString>> Others;
+};
+
 /** Builds layouts from UObject reflection (game thread). */
 class FWebGPUStructLayoutBuilder
 {
@@ -130,7 +219,8 @@ public:
 			const FProperty* Property = *It;
 			FWebGPUStructLayout::FField Field;
 			Field.Property = Property;
-			Field.WgslName = FWebGPUStructLayout::SanitizeIdentifier(Property->GetAuthoredName());
+			Field.Name = Property->GetAuthoredName();
+			Field.WgslName = FWebGPUStructLayout::SanitizeIdentifier(Field.Name);
 			Field.ArrayDim = Property->ArrayDim;
 			Field.SourceElementSize = (uint32)Property->GetElementSize();
 
@@ -366,7 +456,7 @@ FString FWebGPUStructLayout::GenerateWGSL() const
 {
 	TArray<FString> Declared;
 	FString Out;
-	GenerateWGSL(Declared, Out);
+	GenerateWGSL(Declared, Out, nullptr);
 	return Out;
 }
 
@@ -378,38 +468,64 @@ FString FWebGPUStructLayout::GenerateWGSL(TConstArrayView<TSharedPtr<const FWebG
 	{
 		if (Layout)
 		{
-			Layout->GenerateWGSL(Declared, Out);
+			Layout->GenerateWGSL(Declared, Out, nullptr);
 		}
 	}
 	return Out;
 }
 
-void FWebGPUStructLayout::GenerateWGSL(TArray<FString>& Declared, FString& Out) const
+FString FWebGPUStructLayout::GenerateWGSL(TConstArrayView<TSharedPtr<const FWebGPUStructLayout>> Layouts, const FString& Source)
 {
+	const FWebGPUSourceSpellings Spellings(Source);
+	TArray<FString> Declared;
+	FString Out;
+	for (const TSharedPtr<const FWebGPUStructLayout>& Layout : Layouts)
+	{
+		if (Layout)
+		{
+			Layout->GenerateWGSL(Declared, Out, &Spellings);
+		}
+	}
+	return Out;
+}
+
+void FWebGPUStructLayout::GenerateWGSL(TArray<FString>& Declared, FString& Out, const FWebGPUSourceSpellings* Spellings) const
+{
+	auto TypeName = [Spellings](const FWebGPUStructLayout& Layout)
+	{
+		return Spellings ? SanitizeIdentifier(Spellings->Spell(Layout.StructName, false)) : Layout.WgslName;
+	};
+
 	for (const FField& Field : Fields)
 	{
 		if (Field.Nested)
 		{
-			Field.Nested->GenerateWGSL(Declared, Out);
+			Field.Nested->GenerateWGSL(Declared, Out, Spellings);
 		}
 	}
-	if (Declared.Contains(WgslName))
+	const FString Name = TypeName(*this);
+	if (Declared.Contains(Name))
 	{
 		return;
 	}
-	Declared.Add(WgslName);
+	Declared.Add(Name);
 
 	Out += FString::Printf(TEXT("// UStruct %s, %s layout: %u bytes per element%s\n"), *StructName,
 		Space == EWebGPUAddressSpace::Uniform ? TEXT("uniform") : TEXT("storage"), Stride, bMemcpyCompatible ? TEXT(" (same as UE memory)") : TEXT(""));
-	Out += FString::Printf(TEXT("struct %s {\n"), *WgslName);
+	Out += FString::Printf(TEXT("struct %s {\n"), *Name);
 	for (const FField& Field : Fields)
 	{
+		FString Type = Field.WgslType;
+		if (Field.Nested && Spellings)
+		{
+			Type = Field.ArrayDim > 1 ? FString::Printf(TEXT("array<%s, %d>"), *TypeName(*Field.Nested), Field.ArrayDim) : TypeName(*Field.Nested);
+		}
 		Out += TEXT("\t");
 		if (Field.ExplicitAlign)
 		{
 			Out += FString::Printf(TEXT("@align(%u) "), Field.ExplicitAlign);
 		}
-		Out += FString::Printf(TEXT("%s: %s,\n"), *Field.WgslName, *Field.WgslType);
+		Out += FString::Printf(TEXT("%s: %s,\n"), Spellings ? *SanitizeIdentifier(Spellings->Spell(Field.Name, true)) : *Field.WgslName, *Type);
 	}
 	Out += TEXT("}\n\n");
 }
@@ -558,7 +674,12 @@ bool FWebGPUStructLayout::Matches(const FWebGPUTypeLayout& Reflected, FString& O
 
 	for (const FField& Field : Fields)
 	{
+		// FindField ignores case (FString ==): packaged builds don't keep the case of UE names
 		const FWebGPUTypeLayout::FField* Other = Reflected.FindField(Field.WgslName);
+		if (!Other)
+		{
+			Other = Reflected.FindField(Field.Name);
+		}
 		if (!Other)
 		{
 			Differences.Add(FString::Printf(TEXT("'%s' is not in shader struct %s"), *Field.WgslName, *Reflected.Name));
@@ -583,7 +704,7 @@ bool FWebGPUStructLayout::Matches(const FWebGPUTypeLayout& Reflected, FString& O
 	}
 	for (const FWebGPUTypeLayout::FField& Other : Reflected.Fields)
 	{
-		if (!Fields.ContainsByPredicate([&Other](const FField& Field) { return Field.WgslName == Other.Name; }))
+		if (!Fields.ContainsByPredicate([&Other](const FField& Field) { return Field.WgslName == Other.Name || Field.Name == Other.Name; }))
 		{
 			Differences.Add(FString::Printf(TEXT("shader field '%s' is not in %s"), *Other.Name, *StructName));
 		}

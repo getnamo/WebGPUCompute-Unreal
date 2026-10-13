@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "0.1.1",
+	"Version": 2,
+	"VersionName": "1.0.0",
 	"FriendlyName": "WebGPUCompute",
-	"Description": "",
+	"Description": "GPU compute with WebGPU (Dawn): WGSL kernels from Blueprint, C++ and JavaScript, hot-reloaded .wgsl files, zero-copy render targets on D3D12.",
 	"Category": "Compute",
 	"CreatedBy": "getnamo",
 	"CreatedByURL": "https://github.com/getnamo/",

@@ -41,6 +41,11 @@ public class WebGPUCompute : ModuleRules
 		// Dawn (WebGPU), built from source by Tools/BuildDawn.ps1
 		PublicIncludePaths.Add(Path.Combine(DawnPath, "include"));
 
+		// .wgsl files aren't assets, so packaging only takes them along when told. Loose files (NonUFS), so a
+		// packaged Development build can still hot reload them. A project's own shaders need a
+		// DirectoriesToAlwaysStageAsNonUFS entry (Project Settings > Packaging).
+		RuntimeDependencies.Add("$(PluginDir)/Content/Examples/Army/*.wgsl", StagedFileType.NonUFS);
+
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			string DawnLib = Path.Combine(DawnPath, "lib", "Win64", "webgpu_dawn.lib");

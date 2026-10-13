@@ -6,6 +6,7 @@
 #include "WebGPUStructLayout.generated.h"
 
 struct FWebGPUTypeLayout;
+class FWebGPUSourceSpellings;
 
 /** Which WGSL layout rules apply. Uniform buffers align nested structs and arrays to 16 bytes. */
 UENUM(BlueprintType)
@@ -44,6 +45,8 @@ public:
 	struct FField
 	{
 		const FProperty* Property = nullptr;
+		/** The property's name. Packaged builds don't keep FName case, so it can differ in case from the C++ name. */
+		FString Name;
 		FString WgslName;
 		FString WgslType;
 		/** WGSL offset of the first element, size of one element, and its alignment. */
@@ -86,6 +89,13 @@ public:
 	/** Declarations for several structs, each nested struct declared once. */
 	static FString GenerateWGSL(TConstArrayView<TSharedPtr<const FWebGPUStructLayout>> Layouts);
 
+	/**
+	 * Declarations for a kernel's source: struct and field names take the source's spelling when they differ from it
+	 * only in case. UE names come from FNames, whose case packaged builds don't keep ("Position" can come back as
+	 * "position"), so a kernel that compiles in the editor keeps compiling in a packaged game.
+	 */
+	static FString GenerateWGSL(TConstArrayView<TSharedPtr<const FWebGPUStructLayout>> Layouts, const FString& Source);
+
 	/** Packs Count elements (UE memory, SourceStride apart) into Dest (Count * GetStride() bytes). */
 	void Pack(const void* Elements, int32 Count, uint8* Dest) const;
 	TArray<uint8> Pack(const void* Elements, int32 Count) const;
@@ -93,7 +103,7 @@ public:
 	/** Unpacks into Count already-constructed UE structs. */
 	void Unpack(const uint8* Source, int32 Count, void* Elements) const;
 
-	/** Compares against a struct Tint reflected from a shader. False lists the differences. */
+	/** Compares against a struct Tint reflected from a shader (names ignore case). False lists the differences. */
 	bool Matches(const FWebGPUTypeLayout& Reflected, FString& OutDifferences) const;
 
 	/** WGSL-safe identifier for a name (invalid characters, leading digits and keywords handled). */
@@ -104,7 +114,7 @@ private:
 
 	void PackElement(const uint8* Source, uint8* Dest) const;
 	void UnpackElement(const uint8* Source, uint8* Dest) const;
-	void GenerateWGSL(TArray<FString>& Declared, FString& Out) const;
+	void GenerateWGSL(TArray<FString>& Declared, FString& Out, const FWebGPUSourceSpellings* Spellings) const;
 
 	FString StructName;
 	FString WgslName;

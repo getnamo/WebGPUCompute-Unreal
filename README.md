@@ -54,6 +54,8 @@ Context->ReadStructArray<FAgentState>(Agents.ToSharedRef(), 0, Count, [](bool bS
 
 Blueprint has the same through **Create WebGPU Struct Buffer**, **Create WebGPU Kernel With Structs**, **Write WebGPU Struct Array** and **WebGPU Bytes To Struct Array** (wildcard struct arrays), **Get WGSL For Struct**, and the kernel's **Get Bindings** / **Get Workgroup Size**. If a struct buffer's UStruct and the shader's struct disagree, a warning lists the differing fields.
 
+The declared names follow your kernel's spelling when it differs only in case, because packaged builds don't keep the case of UE names: there `Position` can come back as `position` if the engine registered that spelling first.
+
 ### Streams
 
 Writes and reads join the command buffer of the dispatches around them, so write → dispatch → write → dispatch → read is a single submit. For work that repeats every frame, `WebGPUStreams.h` adds three pieces:
@@ -171,5 +173,14 @@ Context.OnEndPlay = () => scope.release();           // free it all on reload / 
 - A scope releases its kernels, bindings, buffers, textures and streams together. Do it when the script reloads: `Context.OnEndPlay` in a `JavascriptInstanceComponent`, or the cleanup function a `devrequire` main returns. `GetWebGPUStats()` reports live buffers, bytes, kernels and textures, to check that nothing piles up.
 
 **Example:** map **ArmyExampleJs** runs the same army from `Content/Scripts/examples/webgpu/army.js`. The script owns the resources, dispatches every frame, and reads per-team numbers back from the GPU (`army_stats.wgsl`) to show them. Save the script and it runs again (a file watcher calls the instance component's `Reload()`); its scope frees the old run's GPU objects first. Save a `.wgsl` file and only the kernels reload. The Blueprint and map come from `Tools/Examples/army_js_example.json`.
+
+The prebuilt release binaries are built without UnrealJs, so they load in any project. With UnrealJs in a C++ project, the plugin is rebuilt with the project and the JavaScript layer switches on.
+
+### Packaging
+
+- `.wgsl` files aren't assets, so packaging only takes them along when told. The examples' shaders and scripts are staged by the plugin. For your own shaders, add their folder to **Project Settings > Packaging > Additional Non-Asset Directories To Copy** (`DirectoriesToAlwaysStageAsNonUFS`, e.g. `Shaders` for `Content/Shaders`), and make sure the maps that use them are cooked.
+- They are staged as loose files, so Development builds still hot reload them when edited in place. Shipping builds don't watch files.
+- `dxcompiler.dll` is staged next to the game executable.
+- Tested: a packaged Win64 Development build passes the plugin's automation tests (`WebGPU`, with `-nullrhi` and with D3D12), including `WebGPU.Examples.ArmyGame` and `WebGPU.Js.ArmyGame`, which open the example maps and check that the armies march.
 
 [Discord Server](https://discord.gg/qfJUyxaW4s)

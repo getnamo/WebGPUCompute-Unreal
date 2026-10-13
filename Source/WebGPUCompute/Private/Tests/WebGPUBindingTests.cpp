@@ -382,6 +382,77 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWebGPUStructNameCaseTest, "WebGPU.Binding.StructNameCase", WebGPUBindingTests::Flags)
+bool FWebGPUStructNameCaseTest::RunTest(const FString& Parameters)
+{
+	using namespace WebGPUBindingTests;
+
+	// Packaged builds don't keep FName case ("Position" can come back as "position"), so a kernel's struct
+	// declarations follow the kernel's own spelling of the names. Spelled differently here, as a packaged build would.
+	TSharedPtr<const FWebGPUStructLayout> Agent = FWebGPUStructLayout::Get(FWebGPUTestAgent::StaticStruct());
+	TSharedPtr<const FWebGPUStructLayout> Mixed = FWebGPUStructLayout::Get(FWebGPUTestMixed::StaticStruct());
+	if (!TestTrue(TEXT("Layouts"), Agent.IsValid() && Mixed.IsValid()))
+	{
+		return false;
+	}
+	const FString Source = TEXT(R"(
+// Heading and Flags are only mentioned here; webgputestinner too
+@group(0) @binding(0) var<storage, read_write> agents: array<webgputestagent>;
+@group(0) @binding(1) var<storage, read_write> mixed: array<WebGPUTestMixed>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+	let i = id.x;
+	if (i < arrayLength(&agents)) {
+		let speed = 2.0;
+		agents[i].position.x = agents[i].position.x + agents[i].SPEED * speed;
+	}
+	if (i < arrayLength(&mixed)) {
+		mixed[i].inner.a = mixed[i].Team;
+	}
+}
+)");
+	const FString Preamble = FWebGPUStructLayout::GenerateWGSL({ Agent, Mixed }, Source);
+	AddInfo(Preamble);
+	TestTrue(TEXT("Struct takes the source's spelling"), Preamble.Contains(TEXT("struct webgputestagent {")));
+	TestTrue(TEXT("Fields take the source's spelling"), Preamble.Contains(TEXT("\tposition: vec3<f32>,")) && Preamble.Contains(TEXT("\tinner: WebGPUTestInner,")));
+	TestTrue(TEXT("Member accesses win over other identifiers"), Preamble.Contains(TEXT("\tSPEED: f32,")));
+	TestTrue(TEXT("Names in comments don't count"), Preamble.Contains(TEXT("\tHeading: vec2<f32>,")) && Preamble.Contains(TEXT("struct WebGPUTestInner {")));
+	TestTrue(TEXT("Exact spellings stay"), Preamble.Contains(TEXT("struct WebGPUTestMixed {")) && Preamble.Contains(TEXT("\tTeam: u32,")));
+
+	TSharedPtr<FWebGPUContext> Context = UWebGPUSubsystem::GetSharedContext();
+	if (!TestTrue(TEXT("Context"), Context.IsValid()))
+	{
+		return false;
+	}
+	FWebGPUKernelDesc Desc;
+	Desc.Label = TEXT("struct-name-case");
+	Desc.Structs = { FWebGPUTestAgent::StaticStruct(), FWebGPUTestMixed::StaticStruct() };
+	Desc.Source = Source.Replace(TEXT("mixed[i].inner.a = mixed[i].Team;"), TEXT("mixed[i].inner.A = f32(mixed[i].Team);"));
+	TSharedRef<FWebGPUKernel> Kernel = Context->CreateKernel(Desc, nullptr, EWebGPUCallbackThread::WorkerThread);
+	TSharedPtr<FWebGPUBuffer> Agents = Context->CreateStructBuffer(FWebGPUTestAgent::StaticStruct(), 64);
+	TSharedPtr<FWebGPUBuffer> MixedBuffer = Context->CreateStructBuffer(FWebGPUTestMixed::StaticStruct(), 64);
+	Context->SetBufferByName(Kernel, TEXT("agents"), Agents);
+	Context->SetBufferByName(Kernel, TEXT("mixed"), MixedBuffer);
+	if (!TestTrue(TEXT("Kernel with other spellings compiled"), WaitReady(Kernel)))
+	{
+		AddError(FWebGPUDevice::FormatCompileMessages(Kernel->GetMessages()));
+		AddInfo(Kernel->GetCompiledSource());
+		return false;
+	}
+	TestTrue(TEXT("Preamble follows the compiled source"), Kernel->GetPreamble().Contains(TEXT("\tinner: WebGPUTestInner,")) && Kernel->GetPreamble().Contains(TEXT("\tA: f32,")));
+
+	// Struct buffers still bind (layout checks ignore case) and the kernel runs
+	const FWebGPUStats Before = Context->GetStats();
+	Context->DispatchForCount(Kernel, 64);
+	TArray<uint8> Bytes;
+	TestTrue(TEXT("Read agents"), ReadAll(*Context, Agents.ToSharedRef(), Bytes));
+	const FWebGPUStats After = Context->GetStats();
+	TestEqual(TEXT("Dispatched, not skipped"), After.Dispatches - Before.Dispatches, (int64)1);
+	TestEqual(TEXT("Nothing skipped"), After.SkippedDispatches - Before.SkippedDispatches, (int64)0);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWebGPUBindingValidationTest, "WebGPU.Binding.Validation", WebGPUBindingTests::Flags)
 bool FWebGPUBindingValidationTest::RunTest(const FString& Parameters)
 {

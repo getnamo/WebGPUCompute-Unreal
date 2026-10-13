@@ -205,6 +205,12 @@ FString FWebGPUKernel::GetCompiledSource() const
 	return CompiledSource;
 }
 
+FString FWebGPUKernel::GetPreamble() const
+{
+	FScopeLock Lock(&StateLock);
+	return Preamble;
+}
+
 void FWebGPUKernel::ReleaseBindGroups()
 {
 	for (const TPair<uint32, WGPUBindGroup>& Pair : BindGroups)
@@ -533,32 +539,24 @@ TSharedRef<FWebGPUKernel> FWebGPUContext::CreateKernel(const FWebGPUKernelDesc& 
 	if (bFromFile)
 	{
 		FileSource = FWebGPUShaderFiles::Load(Desc.SourceFile);
-		if (Desc.bHotReload)
+		// Shipping builds don't watch shader files: nobody edits them there
+		if (Desc.bHotReload && !UE_BUILD_SHIPPING)
 		{
 			WatchKernelFile(Kernel, FileSource);
 		}
 	}
 
-	// UStructs become WGSL declarations ahead of the source (built here: it reads UObject reflection)
-	if (Desc.Structs.Num() > 0)
+	// UStructs become WGSL declarations ahead of the source (layouts built here: they read UObject reflection)
+	for (const UScriptStruct* Struct : Desc.Structs)
 	{
-		TArray<TSharedPtr<const FWebGPUStructLayout>> Layouts;
-		for (const UScriptStruct* Struct : Desc.Structs)
+		FString Error;
+		if (TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(Struct, EWebGPUAddressSpace::Storage, Error))
 		{
-			FString Error;
-			if (TSharedPtr<const FWebGPUStructLayout> Layout = FWebGPUStructLayout::Get(Struct, EWebGPUAddressSpace::Storage, Error))
-			{
-				Layouts.Add(Layout);
-			}
-			else
-			{
-				UE_LOG(LogWebGPU, Error, TEXT("Kernel '%s': struct %s left out of the preamble: %s"), *Kernel->Label, Struct ? *Struct->GetName() : TEXT("null"), *Error);
-			}
+			Kernel->StructLayouts.Add(Layout);
 		}
-		Kernel->Preamble = FWebGPUStructLayout::GenerateWGSL(Layouts);
-		for (TCHAR Char : Kernel->Preamble)
+		else
 		{
-			Kernel->PreambleLines += Char == TEXT('\n') ? 1 : 0;
+			UE_LOG(LogWebGPU, Error, TEXT("Kernel '%s': struct %s left out of the preamble: %s"), *Kernel->Label, Struct ? *Struct->GetName() : TEXT("null"), *Error);
 		}
 	}
 
@@ -894,15 +892,23 @@ void FWebGPUContext::CompileKernel(const TSharedRef<FWebGPUKernel>& Kernel, FWeb
 		return;
 	}
 
-	const FString FullSource = Kernel->Preamble + Kernel->Source;
+	// Struct declarations follow this source's spelling of their names, so they're generated for each compile
+	const FString Preamble = Kernel->StructLayouts.Num() > 0 ? FWebGPUStructLayout::GenerateWGSL(Kernel->StructLayouts, Kernel->Source) : FString();
+	int32 PreambleLines = 0;
+	for (TCHAR Char : Preamble)
+	{
+		PreambleLines += Char == TEXT('\n') ? 1 : 0;
+	}
+	const FString FullSource = Preamble + Kernel->Source;
 	{
 		FScopeLock Lock(&Kernel->StateLock);
+		Kernel->Preamble = Preamble;
 		Kernel->CompiledSource = FullSource;
 	}
 
 	TArray<FWebGPUCompileMessage> Messages;
 	WGPUShaderModule Module = WorkerDevice->CreateShaderModule(FullSource, Kernel->Label, Messages);
-	RemapPreambleLines(Messages, Kernel->PreambleLines);
+	RemapPreambleLines(Messages, PreambleLines);
 	if (Kernel->SourceMap)
 	{
 		Kernel->SourceMap->Apply(Messages);

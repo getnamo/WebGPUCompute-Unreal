@@ -32,5 +32,11 @@ public class WebGPUComputeJs : ModuleRules
 			}
 		}
 		PublicDefinitions.Add("WITH_WEBGPU_UNREALJS=" + (bHasUnrealJs ? "1" : "0"));
+
+		// webgpu.js and the examples, found by UnrealJs's per-plugin Content/Scripts search path
+		if (bHasUnrealJs)
+		{
+			RuntimeDependencies.Add("$(PluginDir)/Content/Scripts/...", StagedFileType.NonUFS);
+		}
 	}
 }

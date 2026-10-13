@@ -184,7 +184,7 @@ int32 FWebGPUContext::PollShaderFiles()
 
 void FWebGPUContext::SetHotReload(const TSharedRef<FWebGPUKernel>& Kernel, bool bEnabled)
 {
-	if (!bEnabled)
+	if (!bEnabled || UE_BUILD_SHIPPING)
 	{
 		FScopeLock Lock(&WatchLock);
 		WatchedKernels.RemoveAll([&Kernel](const FWatchedKernel& Entry) { return Entry.Kernel.HasSameObject(&Kernel.Get()); });
